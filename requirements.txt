@@ -1,0 +1,6 @@
+aiogram>=3.20,<4        # фреймворк для Telegram-бота
+google-genai>=1.0,<3    # офіційний SDK Gemini API (<3: велике оновлення може зламати код)
+python-dotenv>=1.0      # читає .env у змінні оточення
+pyyaml>=6.0             # читає базу знань бізнесу з YAML
+aiosqlite>=0.20         # асинхронна SQLite (крок 6)
+tzdata                  # база часових поясів: на сервері її може не бути → ZoneInfo("Europe/Kyiv") впаде
