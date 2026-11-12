@@ -12,6 +12,10 @@
 
 Якщо ADMIN_CHAT_ID не задано або Telegram видав помилку — бот не мовчить
 і не бреше: дає клієнту телефон (запасний варіант).
+
+Невідкладний стан (медичний режим) — окремий шлях send_emergency(): клієнт ОДРАЗУ
+отримує телефон, а адмін — картку 🚨. Клієнта НЕ переводимо в режим «чекайте
+адміністратора»: уночі чат може ніхто не читати, а бот має й далі відповідати.
 """
 import logging
 from html import escape
@@ -23,7 +27,7 @@ from aiogram.types import Message, User
 from bot import db, history
 from bot.config import load_config
 from bot.keyboards import main_menu
-from bot.knowledge import KB
+from bot.knowledge import KB, SAFETY, UI
 from bot.llm import Reason
 
 log = logging.getLogger(__name__)
@@ -35,23 +39,49 @@ ADMIN_CHAT_ID = load_config().admin_chat_id
 # разом із власником: скільки зазвичай чекають відповіді в робочий час.
 TICKET_IDLE_HOURS = 2
 
-# Що сказати клієнту — фіксований текст у коді, не від моделі.
+# Що сказати клієнту — фіксований текст (код або YAML бізнесу), не від моделі.
+# YAML може перевизначити будь-який рядок: ui.handoff_texts.<reason>, ui.handoff_confirm.
 CLIENT_TEXT = {
     Reason.BOOKING: "📅 Записом займається адміністратор.",
     Reason.HUMAN_REQUEST: "👤 Звісно.",
     Reason.COMPLAINT: "🙏 Нам шкода, що так вийшло.",
     Reason.NO_INFO: "🙋 На це питання краще відповість адміністратор.",
+    Reason.MEDICAL: SAFETY.get("medical_text", "").strip(),
 }
+for _key, _text in (UI.get("handoff_texts") or {}).items():
+    CLIENT_TEXT[Reason(_key)] = _text.strip()
+HANDOFF_CONFIRM = (UI.get("handoff_confirm") or (
+    "✅ Передав ваше звернення адміністратору — він відповість тут, у цьому чаті.\n"
+    "Усе, що напишете далі, побачить адміністратор.")).strip()
+EMERGENCY_TEXT = SAFETY.get("emergency_text", "").strip()
+if SAFETY.get("medical") and not (EMERGENCY_TEXT and CLIENT_TEXT[Reason.MEDICAL]):
+    raise SystemExit("❌ safety.medical: true потребує safety.emergency_text і safety.medical_text")
+
 # Як причина виглядає для адміна
 ADMIN_LABEL = {
     Reason.BOOKING: "📅 Запис",
     Reason.HUMAN_REQUEST: "👤 Просить адміністратора",
     Reason.COMPLAINT: "⚠️ Скарга",
     Reason.NO_INFO: "❓ Бот не знає відповіді",
+    Reason.EMERGENCY: "🚨 НЕВІДКЛАДНИЙ СТАН (клієнту одразу дано телефон)",
+    Reason.MEDICAL: "🩺 Питання про стан тварини (бот порад не давав)",
 }
 
 
+def client_notice(reason: Reason) -> str:
+    """Фіксований текст, який клієнт бачить при передачі (звичайний шлях, нове звернення).
+
+    Окрема функція, бо її використовує і тест-набір: перевіряємо те, що бачить клієнт.
+    """
+    if reason == Reason.EMERGENCY:
+        return EMERGENCY_TEXT
+    return f"{CLIENT_TEXT[reason]}\n{HANDOFF_CONFIRM}"
+
+
 async def request_handoff(message: Message, reason: Reason, question: str) -> None:
+    if reason == Reason.EMERGENCY:
+        await send_emergency(message, question)
+        return
     user = message.from_user
     log.info("HANDOFF | user=%s | reason=%s | q=%s", user.id, reason.value, question[:100])
 
@@ -77,12 +107,32 @@ async def request_handoff(message: Message, reason: Reason, question: str) -> No
     if already_open:
         await message.answer("Ви вже на зв'язку з адміністратором — він побачить це повідомлення.")
     else:
-        await message.answer(
-            f"{CLIENT_TEXT[reason]}\n"
-            "✅ Передав ваше звернення адміністратору — він відповість тут, у цьому чаті.\n"
-            "Усе, що напишете далі, побачить адміністратор.",
-            reply_markup=main_menu,
-        )
+        await message.answer(client_notice(reason), reply_markup=main_menu)
+
+
+async def send_emergency(message: Message, question: str) -> None:
+    """Невідкладний стан: СПЕРШУ телефон клієнту, потім (тихо) картка адміну.
+
+    Звернення НЕ відкриваємо: бот і далі відповідає клієнту сам, а не «мовчить і чекає»
+    адміністратора, якого вночі може не бути. Якщо адмін напише в тему — розмова
+    відкриється (див. handlers/admin.py).
+    """
+    user = message.from_user
+    log.warning("EMERGENCY | user=%s | q=%s", user.id, question[:100])
+    await message.answer(EMERGENCY_TEXT, reply_markup=main_menu)
+    if ADMIN_CHAT_ID is None:
+        return
+    try:
+        ticket = await _active_ticket(message.bot, user.id)
+        if ticket is not None:  # клієнт уже в розмові з адміном — додаємо в його тему
+            await _send_to_topic(message.bot, user, f"➕ {ADMIN_LABEL[Reason.EMERGENCY]}: «{escape(question)}»")
+            await db.touch_ticket(user.id)
+        else:
+            card = await _admin_card(user, Reason.EMERGENCY, question)
+            await _send_to_topic(message.bot, user, card)
+            await db.set_status(user.id, "closed")  # тема є, але бот не замовкає
+    except TelegramAPIError:
+        log.exception("Не вдалося надіслати адміну картку невідкладного стану")
 
 
 async def forward_to_admin(message: Message) -> bool:

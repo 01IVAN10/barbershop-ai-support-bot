@@ -17,3 +17,7 @@ storage/
 # macOS
 .DS_Store
 Progress.md
+Plan.md
+
+# Real client data (knowledge bases, eval cases, per-bot .env) — never in the public repo
+private/

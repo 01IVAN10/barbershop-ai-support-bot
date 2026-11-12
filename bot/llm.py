@@ -9,12 +9,13 @@ import asyncio
 import logging
 from enum import Enum
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, create_model
 
 from google import genai
 from google.genai import errors, types
 
 from bot.config import load_config
+from bot.knowledge import SAFETY
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +39,21 @@ class Reason(str, Enum):
     BOOKING = "booking"              # запис, перенесення, скасування
     HUMAN_REQUEST = "human_request"  # клієнт сам просить живу людину
     COMPLAINT = "complaint"          # скарга, конфлікт, негатив
+    # Лише для бізнесів із safety.medical: true (ветклініка тощо):
+    EMERGENCY = "emergency"          # невідкладний стан — клієнту одразу телефон, без «чекайте»
+    MEDICAL = "medical_question"     # симптоми, стан, ліки, лікування — тільки людина
+
+
+MEDICAL_REASONS = {Reason.EMERGENCY, Reason.MEDICAL}
+# Медичний режим вмикається в YAML бізнесу. Без нього модель навіть не бачить цих причин.
+MEDICAL_MODE = bool(SAFETY.get("medical"))
+
+_ANSWER_DESC = (
+    "Текст для клієнта. Без обіцянок дій: не пиши «передам», «запишу», "
+    "«з вами зв'яжуться» — про передачу людині повідомить система."
+)
+_NEEDS_HUMAN_DESC = "true, якщо потрібен адміністратор"
+_REASON_DESC = "Чому потрібен адміністратор; none, якщо не потрібен"
 
 
 class BotReply(BaseModel):
@@ -45,12 +61,30 @@ class BotReply(BaseModel):
 
     Описи полів (description) теж ідуть моделі — це частина інструкції.
     """
-    answer: str = Field(description=(
-        "Текст для клієнта. Без обіцянок дій: не пиши «передам», «запишу», "
-        "«з вами зв'яжуться» — про передачу людині повідомить система."
-    ))
-    needs_human: bool = Field(description="true, якщо потрібен адміністратор")
-    reason: Reason = Field(description="Чому потрібен адміністратор; none, якщо не потрібен")
+    answer: str = Field(description=_ANSWER_DESC)
+    needs_human: bool = Field(description=_NEEDS_HUMAN_DESC)
+    reason: Reason = Field(description=_REASON_DESC)
+
+
+def _response_schema() -> type[BaseModel]:
+    """Схема для Gemini: та сама BotReply, але лише з причинами, доступними цьому бізнесу.
+
+    Барбершоп отримує рівно ту схему, що й раніше (без emergency / medical_question),
+    тож його поведінка не змінюється.
+    """
+    allowed = [r for r in Reason if MEDICAL_MODE or r not in MEDICAL_REASONS]
+    reason_enum = Enum("Reason", {r.name: r.value for r in allowed}, type=str)
+    reason_enum.__doc__ = Reason.__doc__  # описи теж ідуть моделі — лишаємо їх як були
+    return create_model(
+        "BotReply",
+        __doc__=BotReply.__doc__,
+        answer=(str, Field(description=_ANSWER_DESC)),
+        needs_human=(bool, Field(description=_NEEDS_HUMAN_DESC)),
+        reason=(reason_enum, Field(description=_REASON_DESC)),
+    )
+
+
+_RESPONSE_SCHEMA = _response_schema()
 
 
 class LLMError(Exception):
@@ -74,15 +108,17 @@ async def ask_llm(system_prompt: str, history: list[dict]) -> BotReply:
     response = await _generate_with_retry(system_prompt, contents)
     _log_usage(response)
 
-    # response.parsed — SDK уже перетворив JSON на BotReply.
+    # response.parsed — SDK уже перетворив JSON на об'єкт схеми.
     # Якщо ні (рідко: обірвана відповідь) — пробуємо розібрати текст самі.
-    reply = response.parsed
-    if not isinstance(reply, BotReply):
+    parsed = response.parsed
+    if not isinstance(parsed, _RESPONSE_SCHEMA):
         try:
-            reply = BotReply.model_validate_json(response.text or "")
+            parsed = _RESPONSE_SCHEMA.model_validate_json(response.text or "")
         except ValidationError as e:
             log.error("Модель повернула не той формат: %r", (response.text or "")[:300])
             raise LLMError("Неправильний формат відповіді") from e
+    reply = BotReply(answer=parsed.answer, needs_human=parsed.needs_human,
+                     reason=Reason(parsed.reason.value))
 
     # Захист від суперечностей: «людина не потрібна», але причина вказана — і навпаки.
     if reply.needs_human and reply.reason == Reason.NONE:
@@ -111,7 +147,7 @@ async def _generate_with_retry(system_prompt: str, contents: list):
                     # Структурована відповідь: модель повертає JSON рівно за схемою BotReply.
                     # Це надійніше, ніж просити «відповідай у JSON» у промпті.
                     response_mime_type="application/json",
-                    response_schema=BotReply,
+                    response_schema=_RESPONSE_SCHEMA,
                 ),
             )
         except errors.APIError as e:

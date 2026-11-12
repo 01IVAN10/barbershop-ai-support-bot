@@ -1,47 +1,53 @@
-"""Кнопки меню: відповіді прямо з бази знань, без AI."""
+"""Кнопки меню: відповіді прямо з бази знань, без AI.
+
+Що робить кожна кнопка, описано в YAML бізнесу (ui.menu):
+  render  — текст будує код із даних (ціни, графік...) — 100% точність;
+  reply   — готовий текст із YAML;
+  handoff — передача адміністратору (запис або «покличте людину»).
+"""
 from aiogram import F, Router
 from aiogram.types import Message
 
-from bot import keyboards as kb
-from bot import knowledge
 from bot.handoff import BUTTON_PREFIX, request_handoff
+from bot.keyboards import BUTTONS
+from bot.knowledge import RENDERERS
 from bot.llm import Reason
 
 router = Router(name="menu")
 
-
-# F.text == ... — "магічний фільтр" aiogram: хендлер спрацює,
-# лише якщо текст повідомлення дорівнює тексту кнопки.
-@router.message(F.text == kb.BTN_PRICES)
-async def show_prices(message: Message) -> None:
-    await message.answer(knowledge.format_prices())
+TELEGRAM_LIMIT = 4000  # ліміт Telegram — 4096 символів; беремо із запасом
 
 
-@router.message(F.text == kb.BTN_SCHEDULE)
-async def show_schedule(message: Message) -> None:
-    await message.answer(knowledge.format_schedule())
-
-@router.message(F.text == kb.BTN_PAYMENT)
-async def show_payment(message: Message) -> None:
-    await message.answer(knowledge.format_payment())
-
-@router.message(F.text == kb.BTN_MASTERS)
-async def show_masters(message: Message) -> None:
-    await message.answer(knowledge.format_masters())
-
-
-@router.message(F.text == kb.BTN_CONTACTS)
-async def show_contacts(message: Message) -> None:
-    await message.answer(knowledge.format_contacts())
-
-
-# Запис і адміністратор — та сама функція передачі, що й для AI.
-# На кроці 5 вона почне справді пересилати звернення в адмін-групу.
-@router.message(F.text == kb.BTN_BOOK)
-async def book(message: Message) -> None:
-    await request_handoff(message, Reason.BOOKING, f"{BUTTON_PREFIX} «{message.text}»")
+def split_message(text: str, limit: int = TELEGRAM_LIMIT) -> list[str]:
+    """Довгий текст (напр. прайс) → кілька повідомлень, розрізаючи між абзацами."""
+    parts, current = [], ""
+    for block in text.split("\n\n"):
+        candidate = f"{current}\n\n{block}" if current else block
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            parts.append(current)
+        while len(block) > limit:  # один абзац довший за ліміт — ріжемо по рядках
+            cut = block.rfind("\n", 0, limit)
+            cut = cut if cut > 0 else limit
+            parts.append(block[:cut])
+            block = block[cut:].lstrip("\n")
+        current = block
+    if current:
+        parts.append(current)
+    return parts
 
 
-@router.message(F.text == kb.BTN_ADMIN)
-async def call_admin(message: Message) -> None:
-    await request_handoff(message, Reason.HUMAN_REQUEST, f"{BUTTON_PREFIX} «{message.text}»")
+# F.text.in_(...) — "магічний фільтр" aiogram: хендлер спрацює,
+# лише якщо текст повідомлення збігається з текстом однієї з кнопок.
+@router.message(F.text.in_(BUTTONS))
+async def menu_button(message: Message) -> None:
+    btn = BUTTONS[message.text]
+    if "render" in btn or "reply" in btn:
+        text = RENDERERS[btn["render"]]() if "render" in btn else btn["reply"].rstrip("\n")
+        for part in split_message(text):
+            await message.answer(part, disable_web_page_preview=True)
+    else:
+        # Запис і адміністратор — та сама функція передачі, що й для AI.
+        await request_handoff(message, Reason(btn["handoff"]), f"{BUTTON_PREFIX} «{message.text}»")

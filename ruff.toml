@@ -1,0 +1,8 @@
+# Linter config. Run: `uvx ruff check bot tests` — uvx downloads ruff on the fly,
+# so it is NOT a bot dependency (not in requirements.txt, not installed on the server).
+target-version = "py312"
+line-length = 120
+
+[lint]
+# E/W — style errors, F — real bugs (undefined names, unused imports/variables).
+select = ["E", "F", "W"]
