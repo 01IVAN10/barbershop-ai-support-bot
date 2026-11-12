@@ -18,7 +18,7 @@ python -m bot.main                                   # барбершоп
 ENV_FILE=private/<бізнес>/.env python -m bot.main    # інший бот
 python -m bot.config                                 # перевірити налаштування
 
-python -m unittest tests.test_guards -v              # гарантії коду, без моделі, ~1 с
+python -m unittest discover -s tests -v              # усі юніт-тести, без моделі, ~1 с
 uvx ruff check bot tests                             # лінтер (ruff не в requirements)
 python -m tests.run_eval                             # eval барбершопу: 34×3 на живій моделі, ~9 хв
 BUSINESS_FILE=private/<бізнес>/business.yaml \
@@ -43,5 +43,5 @@ Eval перезаписує звіт поруч зі сценаріями (`test
 - Коміти — Conventional Commits англійською: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`.
 - **Порадь, потім чекай.** Коли логічний шматок роботи готовий і перевірки зелені — запропонуй коміт (повідомлення + файли), пуш чи PR. Виконуй commit, push, створення PR і merge лише після того, як автор підтвердив саме цю дію.
 - Перед «готово» — прогнати перевірки й показати результат як є, з провалами:
-  - завжди: `python -m unittest tests.test_guards -v` і `uvx ruff check bot tests`;
+  - завжди: `python -m unittest discover -s tests -v` і `uvx ruff check bot tests`;
   - якщо зачеплено промпт, `llm.py`, `guards.py`, `handoff.py` або YAML бізнесу — eval цього бізнесу (команди вище; потрібен робочий `GEMINI_API_KEY`).

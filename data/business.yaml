@@ -165,6 +165,7 @@ ui:
   #   render: <назва>  — відповідь будує код із даних (knowledge.RENDERERS)
   #   reply: <текст>   — готовий текст із цього файлу
   #   handoff: booking | human_request — передача адміністратору
+  # Довгий прайс (render: price_list) + by_sections: true — спершу кнопки розділів, ціни по одному розділу.
   menu:
     - - {text: "💈 Послуги і ціни", render: prices}
       - {text: "🕐 Графік", render: schedule}
