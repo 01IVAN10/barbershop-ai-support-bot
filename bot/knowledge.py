@@ -9,9 +9,11 @@
 Такий гібрид — аргумент для клієнта: дешевше і надійніше, ніж «усе через AI».
 """
 from html import escape as _escape
-from pathlib import Path
 
 import yaml
+
+from bot.config import business_yaml
+
 
 def escape(text: str) -> str:
     """Екранує <, > і & — інакше текст типу "<5 хв" зламав би HTML-розмітку Telegram.
@@ -19,22 +21,36 @@ def escape(text: str) -> str:
     return _escape(str(text), quote=False)
 
 
-DATA_FILE = Path(__file__).resolve().parent.parent / "data" / "business.yaml"
-
 DAYS_UA = {
     "monday": "Пн", "tuesday": "Вт", "wednesday": "Ср", "thursday": "Чт",
     "friday": "Пт", "saturday": "Сб", "sunday": "Нд",
 }
 
 
+# Службові розділи YAML: тексти інтерфейсу, правила для промпту, налаштування безпеки.
+# Це НЕ факти про бізнес, тому моделі як «база знань» вони не передаються.
+SERVICE_KEYS = ("ui", "prompt", "safety")
+
+
 def load_knowledge() -> dict:
     """Читає YAML один раз при старті. Зміни у файлі — перезапустити бота."""
-    with open(DATA_FILE, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    text, source = business_yaml()
+    kb = yaml.safe_load(text)
+    if not isinstance(kb, dict) or "business" not in kb:
+        raise SystemExit(f"❌ База знань ({source}) має містити розділ business")
+    kb["_source"] = source
+    return kb
 
 
 # Завантажуємо при імпорті модуля: якщо YAML зламаний — бот впаде одразу (fail fast).
 KB = load_knowledge()
+UI: dict = KB.get("ui") or {}
+SAFETY: dict = KB.get("safety") or {}
+
+
+def facts() -> dict:
+    """Лише факти про бізнес — те, що бачить модель (без службових розділів)."""
+    return {k: v for k, v in KB.items() if k not in SERVICE_KEYS and not k.startswith("_")}
 
 
 def format_prices() -> str:
@@ -83,8 +99,45 @@ def format_contacts() -> str:
         f"Instagram: {escape(b['instagram'])}",
     ])
 
+
 def format_payment() -> str:
     lines = ["<b>💵 Способи оплати</b>", ""]
     for method in KB["payment"]["methods"]:
         lines.append(f"• {escape(method)}")
     return "\n".join(lines)
+
+
+def format_price_list() -> str:
+    """Прайс у форматі prices.sections[].items[] — {name, price}.
+
+    price — число (грн) або рядок як у прайсі («від 3800»). Текст береться
+    з файлу як є: кнопка не може «помилитися» з ціною.
+    """
+    p = KB["prices"]
+    lines = [f"<b>{escape(p.get('title', 'Ціни'))}</b>"]
+    for section in p["sections"]:
+        lines += ["", f"<b>{escape(section['name'])}</b>"]
+        for item in section["items"]:
+            price = item["price"]
+            price_text = f"{price} ₴" if isinstance(price, int) else str(price)
+            lines.append(f"• {escape(item['name'])} — {escape(price_text)}")
+    for note in p.get("notes", []):
+        lines += ["", f"<i>{escape(note)}</i>"]
+    return "\n".join(lines)
+
+
+def format_emergency() -> str:
+    """Той самий текст, що бот дає при невідкладному стані (safety.emergency_text)."""
+    return escape(SAFETY.get("emergency_text", "").strip())
+
+
+# Кнопки з `render:` у YAML → функція, що будує відповідь із даних.
+RENDERERS = {
+    "emergency": format_emergency,
+    "prices": format_prices,
+    "schedule": format_schedule,
+    "masters": format_masters,
+    "contacts": format_contacts,
+    "payment": format_payment,
+    "price_list": format_price_list,
+}

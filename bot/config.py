@@ -12,11 +12,39 @@ import os
 import sys
 from dataclasses import dataclass
 
+from pathlib import Path
+
 from dotenv import load_dotenv
+
+# Кілька ботів з одного коду: ENV_FILE — файл налаштувань КОНКРЕТНОГО бота
+# (свій токен, адмін-група, база даних, файл бізнесу). Читається ПЕРШИМ,
+# тому його значення мають перевагу над спільним .env (там, напр., ключ Gemini).
+_env_file = os.getenv("ENV_FILE", "").strip()
+if _env_file:
+    if not Path(_env_file).is_file():
+        sys.exit(f"❌ ENV_FILE={_env_file!r}: файл не знайдено")
+    load_dotenv(_env_file)
 
 # Шукає файл .env у поточній папці і кладе значення в os.environ.
 # Якщо змінна вже задана в оточенні (як на сервері) — .env її НЕ перезапише.
 load_dotenv()
+
+DEFAULT_BUSINESS_FILE = Path(__file__).resolve().parent.parent / "data" / "business.yaml"
+
+
+def business_yaml() -> tuple[str, str]:
+    """Текст бази знань бізнесу і звідки його взято (для логів).
+
+    Порядок: BUSINESS_YAML (сам вміст — для сервера, щоб дані клієнта не лежали
+    в публічному репозиторії) → BUSINESS_FILE (шлях до файлу) → data/business.yaml.
+    """
+    inline = os.getenv("BUSINESS_YAML", "")
+    if inline.strip():
+        return inline, "змінна BUSINESS_YAML"
+    path = Path(os.getenv("BUSINESS_FILE", "").strip() or DEFAULT_BUSINESS_FILE)
+    if not path.is_file():
+        sys.exit(f"❌ Файл бізнесу не знайдено: {path} (перевір BUSINESS_FILE)")
+    return path.read_text(encoding="utf-8"), str(path)
 
 
 @dataclass(frozen=True)  # frozen = налаштування не можна випадково змінити під час роботи
@@ -84,3 +112,5 @@ if __name__ == "__main__":
     print(f"   GEMINI_API_KEY: {cfg.gemini_api_key[:6]}…")
     print(f"   GEMINI_MODEL:   {cfg.gemini_model}")
     print(f"   ADMIN_CHAT_ID:  {cfg.admin_chat_id or 'не задано (передача адміну — телефоном)'}")
+    print(f"   DB_PATH:        {cfg.db_path}")
+    print(f"   Дані бізнесу:   {business_yaml()[1]}")

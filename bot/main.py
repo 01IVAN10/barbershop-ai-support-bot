@@ -10,11 +10,13 @@ import sys
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramAPIError
 
 from bot import db, history
 from bot.config import load_config
 from bot.handoff import check_admin_chat
 from bot.handlers import admin, fallback, menu, start
+from bot.knowledge import KB, UI
 from bot.middlewares import AntiFloodMiddleware, UserTrackingMiddleware
 
 
@@ -28,6 +30,24 @@ async def daily_cleanup() -> None:
         if deleted:
             logging.info("Видалено старих повідомлень: %s", deleted)
         await asyncio.sleep(24 * 60 * 60)
+
+
+async def apply_bot_profile(bot: Bot) -> None:
+    """Опис бота (екран до /start і профіль) — з YAML бізнесу, якщо там задано.
+
+    Так позначка «демо, не офіційний канал» гарантовано стоїть в описі,
+    а не залежить від того, чи не забули вписати її в BotFather.
+    Обмеження Telegram: опис до 512 символів, короткий опис до 120.
+    """
+    description = (UI.get("bot_description") or "").strip()
+    short = (UI.get("bot_short_description") or "").strip()
+    try:
+        if description:
+            await bot.set_my_description(description=description)
+        if short:
+            await bot.set_my_short_description(short_description=short)
+    except TelegramAPIError:
+        logging.exception("Не вдалося встановити опис бота (перевір довжину тексту)")
 
 
 async def main() -> None:
@@ -60,12 +80,15 @@ async def main() -> None:
     dp.include_routers(admin.router, start.router, menu.router, fallback.router)
 
     await db.init(config.db_path)
+    logging.info("Бізнес: %s (дані: %s)", KB["business"]["name"], KB["_source"])
     logging.info("Ліміти AI: %s/год на клієнта, %s/добу на всіх",
                  config.ai_limit_user_hour, config.ai_limit_global_day)
     if config.admin_chat_id is None:
         logging.warning("ADMIN_CHAT_ID не задано: передача адміну працюватиме лише через телефон")
     else:
         await check_admin_chat(bot)  # помилка в ID чи правах — видно одразу при старті
+
+    await apply_bot_profile(bot)
 
     # Ігноруємо повідомлення, що прийшли, поки бот був вимкнений,
     # щоб після перезапуску він не відповідав на старе пачкою.
