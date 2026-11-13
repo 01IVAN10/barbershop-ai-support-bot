@@ -110,15 +110,14 @@ async def get_ticket_by_thread(thread_id: int) -> Ticket | None:
         return _row_to_ticket(await cur.fetchone())
 
 
-async def save_ticket(user_id: int, thread_id: int, status: str = "open") -> None:
-    """Створює звернення або оновлює наявне (upsert)."""
+# Три функції нижче викликає ЛИШЕ bot/tickets.py — він володіє переходами між станами.
+
+async def set_ticket_thread(user_id: int, thread_id: int) -> None:
+    """Запам'ятовує тему клієнта. Нова — зі статусом closed; у наявної статус не чіпаємо."""
     await _db.execute(
-        """INSERT INTO tickets (user_id, thread_id, status) VALUES (?, ?, ?)
-           ON CONFLICT(user_id) DO UPDATE SET
-               thread_id = excluded.thread_id,
-               status = excluded.status,
-               updated_at = CURRENT_TIMESTAMP""",
-        (user_id, thread_id, status),
+        """INSERT INTO tickets (user_id, thread_id, status) VALUES (?, ?, 'closed')
+           ON CONFLICT(user_id) DO UPDATE SET thread_id = excluded.thread_id""",
+        (user_id, thread_id),
     )
     await _db.commit()
 
@@ -129,7 +128,7 @@ async def touch_ticket(user_id: int) -> None:
     await _db.commit()
 
 
-async def set_status(user_id: int, status: str) -> None:
+async def set_ticket_status(user_id: int, status: str) -> None:
     await _db.execute(
         "UPDATE tickets SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
         (status, user_id),
@@ -210,19 +209,28 @@ async def count_questions(since_hours: int, user_id: int | None = None) -> int:
 
 # ---------- статистика ----------
 
-async def stats() -> dict:
-    """Цифри для власника бізнесу (/stats в адмін-групі). «Доба» = останні 24 години."""
+async def stats(ticket_idle_hours: float) -> dict:
+    """Цифри для власника бізнесу (/stats в адмін-групі). «Доба» = останні 24 години.
+
+    tickets_total — скільки клієнтів має тему в адмін-групі (один клієнт = одна тема),
+    а не скільки разів вони зверталися. tickets_open — лише «живі» розмови: прострочене
+    звернення закривається при наступному повідомленні клієнта, а до того лише значиться open.
+    """
+    idle = f"-{ticket_idle_hours * 60:.0f} minutes"
     queries = {
         "users_total": "SELECT COUNT(*) FROM users",
         "users_new_24h": "SELECT COUNT(*) FROM users WHERE first_seen >= datetime('now', '-1 day')",
         "users_active_24h": "SELECT COUNT(*) FROM users WHERE last_seen >= datetime('now', '-1 day')",
         "questions_24h": "SELECT COUNT(*) FROM messages "
                          "WHERE role = 'user' AND created_at >= datetime('now', '-1 day')",
-        "tickets_open": "SELECT COUNT(*) FROM tickets WHERE status = 'open'",
         "tickets_total": "SELECT COUNT(*) FROM tickets",
     }
     result = {}
     for key, sql in queries.items():
         async with _db.execute(sql) as cur:
             result[key] = (await cur.fetchone())[0]
+    async with _db.execute(
+        "SELECT COUNT(*) FROM tickets WHERE status = 'open' AND updated_at >= datetime('now', ?)", (idle,)
+    ) as cur:
+        result["tickets_open"] = (await cur.fetchone())[0]
     return result

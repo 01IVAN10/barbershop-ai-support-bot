@@ -16,7 +16,7 @@ from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.types import ChatMemberUpdated, Message
 
-from bot import db
+from bot import db, tickets
 from bot.config import load_config
 
 log = logging.getLogger(__name__)
@@ -43,24 +43,25 @@ async def show_chat_id(message: Message) -> None:
 @router.message(Command("stats"), F.chat.id == ADMIN_CHAT_ID)
 async def show_stats(message: Message) -> None:
     """Цифри для власника: скільки людей пише боту і скільки доходить до адміна."""
-    st = await db.stats()
+    st = await db.stats(tickets.IDLE_HOURS)
     await message.reply(
         "📊 <b>Статистика бота</b>\n\n"
         f"👥 Клієнтів усього: {st['users_total']}\n"
         f"🆕 Нових за добу: {st['users_new_24h']}\n"
         f"💬 Активних за добу: {st['users_active_24h']}\n"
         f"❓ Питань за добу: {st['questions_24h']}\n\n"
-        f"📨 Звернень до адміна: {st['tickets_total']} (відкритих: {st['tickets_open']})"
+        f"📨 Клієнтів із темою в цій групі: {st['tickets_total']}\n"
+        f"🟢 Відкритих розмов зараз: {st['tickets_open']}"
     )
 
 
 @router.message(Command("close"), in_admin_topic)
 async def close_ticket(message: Message) -> None:
-    ticket = await db.get_ticket_by_thread(message.message_thread_id)
+    ticket = await tickets.by_thread(message.message_thread_id)
     if ticket is None:
         await message.reply("Ця тема не пов'язана з клієнтом.")
         return
-    await db.set_status(ticket.user_id, "closed")
+    await tickets.close(ticket.user_id)
     try:
         await message.bot.send_message(
             ticket.user_id,
@@ -77,7 +78,7 @@ async def close_ticket(message: Message) -> None:
 
 @router.message(in_admin_topic, F.content_type.in_(FORWARDABLE), ~F.text.startswith("/"))
 async def admin_reply(message: Message) -> None:
-    ticket = await db.get_ticket_by_thread(message.message_thread_id)
+    ticket = await tickets.by_thread(message.message_thread_id)
     if ticket is None:
         return  # тема не наша (наприклад, адміни створили її для себе)
     try:
@@ -91,11 +92,9 @@ async def admin_reply(message: Message) -> None:
         log.exception("Не вдалося надіслати відповідь адміна клієнту")
         await message.reply("⚠️ Не вдалося доставити повідомлення клієнту.")
         return
-    if not ticket.is_open:
-        # Адмін написав у закриту тему — значить, продовжує розмову. Відкриваємо.
-        await db.set_status(ticket.user_id, "open")
-    else:
-        await db.touch_ticket(ticket.user_id)  # активність: скидаємо таймер автозакриття
+    # Адмін написав клієнту — розмова триває: відкриваємо (якщо була закрита чи прострочена)
+    # і скидаємо таймер автозакриття.
+    await tickets.start(ticket.user_id)
 
 
 # ---------- діагностика ----------

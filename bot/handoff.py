@@ -1,5 +1,7 @@
 """
-Передача розмови людині. ЄДИНЕ місце в боті, де це відбувається.
+Передача розмови людині. ЄДИНЕ місце в боті, де це відбувається: картки, теми, пересилка.
+Статус звернення (відкрите / закрите / прострочене) змінює лише bot/tickets.py — тут ми
+кажемо йому, ЩО сталося, і повідомляємо про це клієнта й адміна.
 
 Схема:
   клієнт ──(кнопка або AI: needs_human)──► request_handoff()
@@ -18,26 +20,39 @@
 адміністратора»: уночі чат може ніхто не читати, а бот має й далі відповідати.
 """
 import logging
-from html import escape
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import Message, User
 
-from bot import db, history
+from bot import history, tickets
 from bot.config import load_config
+from bot.db import Ticket
 from bot.keyboards import main_menu
-from bot.knowledge import KB, SAFETY, UI, medical_mode
+from bot.knowledge import KB, SAFETY, UI, escape, medical_mode
 from bot.reasons import Reason
 
 log = logging.getLogger(__name__)
 ADMIN_CHAT_ID = load_config().admin_chat_id
 
-# Звернення без активності довше за цей час закривається автоматично.
+# Звернення без активності закривається автоматично (строк — tickets.IDLE_HOURS, з YAML).
 # Інакше: клієнт натиснув «Адміністратор», ніхто не відповів — і бот мовчить для нього
-# назавжди (усе йде адміну, AI не втручається). Для реального бізнесу підбираємо
-# разом із власником: скільки зазвичай чекають відповіді в робочий час.
-TICKET_IDLE_HOURS = 2
+# назавжди (усе йде адміну, AI не втручається). Клієнту про закриття кажемо прямо: він
+# бачив «усе, що напишете далі, побачить адміністратор» і має знати, що це вже не так.
+TICKET_EXPIRED_TEXT = (UI.get("ticket_expired_text") or (
+    "⏱ Розмову з адміністратором закрито: давно не було повідомлень. "
+    "Це повідомлення адміністратор уже не побачить — далі відповідаю я. "
+    "Якщо потрібна людина, напишіть про це.")).strip()
+DELIVERY_FAILED_TEXT = ("⚠️ Не вдалося передати це повідомлення адміністратору. "
+                        "Надішліть його, будь ласка, ще раз за хвилину.")
+
+
+def _safety_text(key: str) -> str:
+    """Текст із розділу safety. Це звичайний текст, а не HTML, тому екрануємо: інакше
+    символ «<» у ньому зламав би розмітку Telegram і повідомлення не відправилось би взагалі
+    (а це телефон при невідкладному стані). Кнопка меню показує його так само — format_emergency."""
+    return escape(SAFETY.get(key, "").strip())
+
 
 # Що сказати клієнту — фіксований текст (код або YAML бізнесу), не від моделі.
 # YAML може перевизначити будь-який рядок: ui.handoff_texts.<reason>, ui.handoff_confirm.
@@ -46,14 +61,14 @@ CLIENT_TEXT = {
     Reason.HUMAN_REQUEST: "👤 Підключаю адміністратора.",
     Reason.COMPLAINT: "🙏 Нам шкода, що так вийшло.",
     Reason.NO_INFO: "🙋 На це питання краще відповість адміністратор.",
-    Reason.MEDICAL: SAFETY.get("medical_text", "").strip(),
+    Reason.MEDICAL: _safety_text("medical_text"),
 }
 for _key, _text in (UI.get("handoff_texts") or {}).items():
     CLIENT_TEXT[Reason(_key)] = _text.strip()
 HANDOFF_CONFIRM = (UI.get("handoff_confirm") or (
     "✅ Передав ваше звернення адміністратору — він відповість тут, у цьому чаті.\n"
     "Усе, що напишете далі, побачить адміністратор.")).strip()
-EMERGENCY_TEXT = SAFETY.get("emergency_text", "").strip()
+EMERGENCY_TEXT = _safety_text("emergency_text")
 if medical_mode() and not (EMERGENCY_TEXT and CLIENT_TEXT[Reason.MEDICAL]):
     raise SystemExit("❌ safety.medical: true потребує safety.emergency_text і safety.medical_text")
 
@@ -106,7 +121,7 @@ async def request_handoff(message: Message, reason: Reason, question: str) -> No
         else:
             text = await _admin_card(user, reason, question)
         await _send_to_topic(message.bot, user, text)
-        await db.touch_ticket(user.id)
+        await tickets.start(user.id)  # розмова з адміном відкрита (або триває)
     except TelegramAPIError:
         log.exception("Не вдалося передати звернення в адмін-групу")
         await _fallback_phone(message, reason)
@@ -126,7 +141,7 @@ async def send_emergency(message: Message, question: str) -> None:
     відкриється (див. handlers/admin.py).
     """
     user = message.from_user
-    log.warning("EMERGENCY | user=%s | q=%s", user.id, question[:100])
+    log.warning("EMERGENCY | user=%s", user.id)
     await message.answer(EMERGENCY_TEXT, reply_markup=main_menu)
     if ADMIN_CHAT_ID is None:
         return
@@ -134,11 +149,10 @@ async def send_emergency(message: Message, question: str) -> None:
         ticket = await _active_ticket(message.bot, user.id)
         if ticket is not None:  # клієнт уже в розмові з адміном — додаємо в його тему
             await _send_to_topic(message.bot, user, f"➕ {ADMIN_LABEL[Reason.EMERGENCY]}: «{escape(question)}»")
-            await db.touch_ticket(user.id)
-        else:
+            await tickets.touch(user.id)
+        else:  # лише картка в тему клієнта; статус не чіпаємо — бот не замовкає
             card = await _admin_card(user, Reason.EMERGENCY, question)
             await _send_to_topic(message.bot, user, card)
-            await db.set_status(user.id, "closed")  # тема є, але бот не замовкає
     except TelegramAPIError:
         log.exception("Не вдалося надіслати адміну картку невідкладного стану")
 
@@ -150,7 +164,9 @@ async def forward_to_admin(message: Message) -> bool:
     """
     if ADMIN_CHAT_ID is None:
         return False
-    ticket = await _active_ticket(message.bot, message.from_user.id)
+    # tell_client: якщо звернення щойно прострочилось, клієнт має про це дізнатися —
+    # він пише адміну, а повідомлення вже піде до AI.
+    ticket = await _active_ticket(message.bot, message.from_user.id, tell_client=message)
     if ticket is None:
         return False
     try:
@@ -160,14 +176,20 @@ async def forward_to_admin(message: Message) -> bool:
             chat_id=ADMIN_CHAT_ID, from_chat_id=message.chat.id,
             message_id=message.message_id, message_thread_id=ticket.thread_id,
         )
-        await db.touch_ticket(message.from_user.id)
+        await tickets.touch(message.from_user.id)
         return True
-    except TelegramAPIError:
+    except (TelegramBadRequest, TelegramForbiddenError):
         # Тему видалили або бота прибрали з групи — закриваємо звернення,
         # щоб клієнт не писав "у порожнечу". Далі знову відповідає AI.
-        log.exception("Не вдалося переслати повідомлення клієнта адміну")
-        await db.set_status(message.from_user.id, "closed")
+        log.exception("Тема клієнта недоступна — закриваю звернення")
+        await tickets.close(message.from_user.id)
         return False
+    except TelegramAPIError:
+        # Мережа, ліміт запитів (429), збій Telegram — це тимчасове. Звернення НЕ закриваємо:
+        # інакше одна мережева помилка мовчки перевела б розмову з адміна на AI.
+        log.exception("Тимчасова помилка Telegram: повідомлення клієнта адміну не доставлено")
+        await message.answer(DELIVERY_FAILED_TEXT)
+        return True
 
 
 async def check_admin_chat(bot: Bot) -> bool:
@@ -204,25 +226,25 @@ async def check_admin_chat(bot: Bot) -> bool:
 
 # ---------- внутрішні функції ----------
 
-async def _active_ticket(bot: Bot, user_id: int) -> db.Ticket | None:
-    """Відкрите і «живе» звернення клієнта. Задавнене — закриваємо автоматично."""
-    ticket = await db.get_ticket_by_user(user_id)
-    if ticket is None or not ticket.is_open:
-        return None
-    if ticket.idle_minutes < TICKET_IDLE_HOURS * 60:
-        return ticket
-    log.info("Автозакриття звернення %s: простій %.0f хв", user_id, ticket.idle_minutes)
-    await db.set_status(user_id, "closed")
+async def _active_ticket(bot: Bot, user_id: int, tell_client: Message | None = None) -> Ticket | None:
+    """Відкрите і «живе» звернення клієнта. Прострочене закривається (tickets.expire),
+    а ми повідомляємо про це адміна і — якщо передано tell_client — клієнта."""
+    expired = await tickets.expire(user_id)
+    if expired is None:
+        return await tickets.active(user_id)
+    log.info("Автозакриття звернення %s: простій %.0f хв", user_id, expired.idle_minutes)
     try:  # адміну — пояснення, щоб не дивувався, чому тема закрилась сама
         await bot.send_message(
             ADMIN_CHAT_ID,
-            f"⏱ Звернення закрито автоматично: {TICKET_IDLE_HOURS} год без активності. "
+            f"⏱ Звернення закрито автоматично: {tickets.IDLE_HOURS:g} год без активності. "
             "Клієнту знову відповідає бот. Напишіть у тему — розмова відновиться.",
-            message_thread_id=ticket.thread_id,
+            message_thread_id=expired.thread_id,
         )
-        await bot.close_forum_topic(ADMIN_CHAT_ID, ticket.thread_id)
+        await bot.close_forum_topic(ADMIN_CHAT_ID, expired.thread_id)
     except TelegramAPIError:
         pass  # не критично
+    if tell_client is not None:
+        await tell_client.answer(TICKET_EXPIRED_TEXT)
     return None
 
 
@@ -241,7 +263,12 @@ async def _send_to_topic(bot: Bot, user: User, text: str) -> None:
 
 
 async def _ensure_topic(bot: Bot, user: User) -> int:
-    ticket = await db.get_ticket_by_user(user.id)
+    """Повертає ID теми клієнта в адмін-групі; створює її, якщо ще немає.
+
+    Статус звернення тут НЕ змінюється: тема — це місце для повідомлень, а чи відкрита
+    розмова, вирішує той, хто пише в тему (request_handoff — так, send_emergency — ні).
+    """
+    ticket = await tickets.get(user.id)
     if ticket is None:
         return await _create_topic(bot, user)
     if not ticket.is_open:
@@ -249,14 +276,13 @@ async def _ensure_topic(bot: Bot, user: User) -> int:
             await bot.reopen_forum_topic(ADMIN_CHAT_ID, ticket.thread_id)
         except TelegramBadRequest:
             pass  # тема вже відкрита або зникла — це обробить _send_to_topic
-        await db.set_status(user.id, "open")
     return ticket.thread_id
 
 
 async def _create_topic(bot: Bot, user: User) -> int:
     name = f"{user.full_name} · {user.id}"[:128]  # ліміт Telegram — 128 символів
     topic = await bot.create_forum_topic(ADMIN_CHAT_ID, name)
-    await db.save_ticket(user.id, topic.message_thread_id, "open")
+    await tickets.remember_topic(user.id, topic.message_thread_id)
     return topic.message_thread_id
 
 
@@ -269,7 +295,9 @@ async def _admin_card(user: User, reason: Reason, question: str) -> str:
         # Кнопку показуємо як дію, а не як текст, що його «написав» клієнт.
         f"🔘 {escape(question)}" if question.startswith(BUTTON_PREFIX) else f"💬 «{escape(question)}»",
     ]
-    recent = await _history_before(user.id, question)
+    recent, bot_answer = await _history_before(user.id, question)
+    if bot_answer:  # що бот уже відповів на ЦЕ питання — щоб адмін не повторював
+        lines.append(f"🤖 Бот відповів: {escape(bot_answer[:300])}")
     if recent:
         lines += ["", "<b>Розмова з ботом до цього:</b>"]
         for m in recent:
@@ -286,18 +314,23 @@ BUTTON_PREFIX = "Натиснув кнопку"  # так menu.py познача
 HANDOFF_MARK = "(передано адміністратору)"  # так fallback.py позначає в історії передачу
 
 
-async def _history_before(user_id: int, question: str, limit: int = 6) -> list[dict]:
-    """Останні повідомлення ДО поточного звернення — без нього самого і без службових позначок.
+async def _history_before(user_id: int, question: str, limit: int = 6) -> tuple[list[dict], str | None]:
+    """(розмова ДО поточного питання, відповідь бота на поточне питання або None).
 
     Історію поповнює лише AI-шлях; для кнопки «Адміністратор» поточного питання там немає.
-    Тому не «відрізаємо останнє», а прибираємо саме те, що треба.
+    На AI-шляху в кінці історії лежить поточний обмін: питання клієнта і те, що він на нього
+    побачив (текст бота або позначка передачі). Раніше відрізалась лише позначка — тож при
+    no_info питання в картці дублювалось, а відповідь бота на нього стояла під «розмова до цього».
     """
     msgs = await history.get(user_id)
-    if msgs and msgs[-1]["text"] == HANDOFF_MARK:  # позначка ПОТОЧНОЇ передачі — не потрібна
-        msgs.pop()
-    if msgs and msgs[-1]["role"] == "user" and msgs[-1]["text"] == question:
-        msgs.pop()
-    return msgs[-limit:]
+    answer = None
+    for i in range(len(msgs) - 1, max(len(msgs) - 3, -1), -1):  # поточний обмін — останні 1–2 записи
+        if msgs[i]["role"] == "user" and msgs[i]["text"] == question:
+            shown = [m["text"] for m in msgs[i + 1:] if m["role"] == "assistant" and m["text"] != HANDOFF_MARK]
+            answer = shown[0] if shown else None
+            msgs = msgs[:i]
+            break
+    return msgs[-limit:], answer
 
 
 async def _fallback_phone(message: Message, reason: Reason) -> None:
