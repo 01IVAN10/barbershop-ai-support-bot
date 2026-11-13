@@ -52,6 +52,7 @@ class FallbackCase(unittest.IsolatedAsyncioTestCase):
             (fallback, "ask_llm", self.ask_llm),
             (fallback, "build_system_prompt", MagicMock(return_value="prompt")),
             (fallback, "ChatActionSender", MagicMock()),
+            (fallback, "flood", fallback.FloodGuard(limit=5, window=10)),
             (handoff, "EMERGENCY_TEXT", PHONE_TEXT),
         ]:
             patcher = patch.object(target, name, mock)
@@ -93,6 +94,35 @@ class MedicalBusiness(FallbackCase):
         self.request_handoff.assert_awaited_once_with(message, Reason.EMERGENCY, "Кіт потрапив під машину")
         self.forward_to_admin.assert_not_awaited()
         self.check_ai_quota.assert_not_awaited()
+        self.ask_llm.assert_not_awaited()
+
+    async def test_emergency_is_not_blocked_by_flood(self):
+        """Шосте повідомлення за 10 секунд — і саме воно «собака не дихає»."""
+        self.model_says("Так.")
+        for _ in range(5):
+            await fallback.ai_answer(_message(text="Скільки коштує прийом?"))
+        message = _message(text="Собака не дихає")
+        await fallback.ai_answer(message)
+        self.request_handoff.assert_awaited_once_with(message, Reason.EMERGENCY, "Собака не дихає")
+
+    async def test_flood_refusal_shows_emergency_phone(self):
+        self.model_says("Так.")
+        for _ in range(5):
+            await fallback.ai_answer(_message(text="Скільки коштує прийом?"))
+        message = _message(text="А ще одне питання")
+        await fallback.ai_answer(message)
+        self.assertIn("пишете дуже швидко", _sent(message))
+        self.assertIn(PHONE_TEXT, _sent(message))
+        self.assertEqual(self.ask_llm.await_count, 5)
+
+    async def test_flood_does_not_block_conversation_with_admin(self):
+        """Альбом із 10 фото у відкрите звернення: адмін має отримати всі 10."""
+        self.forward_to_admin.return_value = True
+        for _ in range(10):
+            await fallback.non_text(_message())
+        for _ in range(10):
+            await fallback.ai_answer(_message(text="ще деталь"))
+        self.assertEqual(self.forward_to_admin.await_count, 20)
         self.ask_llm.assert_not_awaited()
 
     async def test_limit_refusal_still_shows_emergency_phone(self):

@@ -190,6 +190,20 @@ async def purge_old_messages(days: int) -> int:
     return cur.rowcount
 
 
+async def purge_inactive_users(days: int) -> int:
+    """Видаляє клієнтів (ім'я, username), які не писали `days` днів і не мають теми в
+    адмін-групі. Клієнта з темою лишаємо: інакше відповідь адміна в старій темі «не знайшла б»
+    його. Повідомлень таких клієнтів уже немає — їх видаляє purge_old_messages з тим самим строком."""
+    cur = await _db.execute(
+        """DELETE FROM users WHERE last_seen < datetime('now', ?)
+           AND user_id NOT IN (SELECT user_id FROM tickets)
+           AND user_id NOT IN (SELECT user_id FROM messages)""",
+        (f"-{days} days",),
+    )
+    await _db.commit()
+    return cur.rowcount
+
+
 # ---------- лічильники для лімітів ----------
 
 async def count_questions(since_hours: int, user_id: int | None = None) -> int:

@@ -7,11 +7,17 @@ Middleware — код, який виконується ДО хендлера д�
 
 outer_middleware (підключаємо в main.py) спрацьовує ще ДО перевірки фільтрів —
 тобто навіть для повідомлень, які жоден хендлер не обробить.
+
+Антифлуд тут НЕ middleware: раніше він стояв перед усім і відкидав повідомлення ще до
+перевірки невідкладного стану й до пересилки адміну — альбом із 10 фото доходив до адміна
+наполовину, а шосте повідомлення «собака не дихає» зникало. Тепер це FloodGuard, який
+fallback.py питає лише перед запитом до моделі: обмежуємо AI, а не зв'язок з людиною.
 """
 import logging
 import time
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any
 
 from aiogram import BaseMiddleware
@@ -37,19 +43,45 @@ class UserTrackingMiddleware(BaseMiddleware):
 log = logging.getLogger(__name__)
 
 
-class AntiFloodMiddleware(BaseMiddleware):
-    """Захист від флуду: не більше `limit` повідомлень за `window` секунд від одного клієнта.
+FLOOD_TEXT = "Ви пишете дуже швидко 🙂 Зачекайте кілька секунд і надішліть питання ще раз."
 
-    Решту повідомлень просто ігноруємо (хендлер не викликається), попередивши один раз.
+
+class FloodGuard:
+    """Не більше `limit` запитів до моделі за `window` секунд від одного клієнта.
+
     Тримаємо в пам'яті, а не в БД: вікно — секунди, після перезапуску скидати не шкода.
-    Для кожного повідомлення це кілька мікросекунд — на відміну від запиту в базу.
     """
 
     def __init__(self, limit: int = 5, window: float = 10.0) -> None:
         self.limit = limit
         self.window = window
-        self._times: dict[int, deque] = defaultdict(deque)  # user_id → час останніх повідомлень
-        self._warned_until: dict[int, float] = {}
+        self._times: dict[int, deque] = defaultdict(deque)  # user_id → час останніх запитів
+
+    def allow(self, user_id: int, now: float | None = None) -> bool:
+        """True — можна питати модель. False — флуд: клієнту треба сказати FLOOD_TEXT.
+        Кажемо щоразу: клієнт має знати, на ЯКЕ повідомлення бот не відповів."""
+        now = time.monotonic() if now is None else now  # monotonic: не «стрибає» при зміні часу
+        times = self._times[user_id]
+        while times and now - times[0] > self.window:  # викидаємо старі відмітки
+            times.popleft()
+        if len(times) >= self.limit:
+            log.info("Флуд від %s: %s запитів за %s с", user_id, len(times), self.window)
+            return False
+        times.append(now)
+        return True
+
+
+class StaleUpdateMiddleware(BaseMiddleware):
+    """Відкидає повідомлення, старші за `max_age` секунд.
+
+    Раніше при старті бот викидав УСЕ, що надійшло, поки він перезапускався (деплой — це
+    хвилина-дві): відповідь адміна в темі чи питання клієнта зникали без сліду для обох.
+    Тепер ці повідомлення обробляються, а відкидаємо лише справді старі — щоб після довгої
+    перерви бот не відповідав пачкою на питання годинної давності.
+    """
+
+    def __init__(self, max_age: float = 600) -> None:
+        self.max_age = max_age
 
     async def __call__(
         self,
@@ -57,22 +89,8 @@ class AntiFloodMiddleware(BaseMiddleware):
         event: Message,
         data: dict[str, Any],
     ) -> Any:
-        user = event.from_user
-        if user is None or event.chat.type != "private":  # адмін-групу не обмежуємо
-            return await handler(event, data)
-
-        now = time.monotonic()  # monotonic: не "стрибає" при зміні системного часу
-        times = self._times[user.id]
-        while times and now - times[0] > self.window:  # викидаємо старі відмітки
-            times.popleft()
-        times.append(now)
-
-        if len(times) <= self.limit:
-            return await handler(event, data)
-
-        # Флуд: повідомлення НЕ обробляємо. Попереджаємо один раз за вікно.
-        if self._warned_until.get(user.id, 0) < now:
-            self._warned_until[user.id] = now + self.window
-            log.info("Флуд від %s: %s повідомлень за %s с", user.id, len(times), self.window)
-            await event.answer("Ви пишете дуже швидко 🙂 Зачекайте кілька секунд.")
-        return None
+        age = (datetime.now(timezone.utc) - event.date).total_seconds()
+        if age > self.max_age:
+            log.info("Пропускаю старе повідомлення (%.0f хв) у чаті %s", age / 60, event.chat.id)
+            return None
+        return await handler(event, data)

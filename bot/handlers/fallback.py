@@ -20,6 +20,7 @@ from bot import history, limits
 from bot.guards import pre_check, resolve
 from bot.handoff import HANDOFF_MARK, forward_to_admin, request_handoff, with_emergency_hint
 from bot.keyboards import main_menu
+from bot.middlewares import FLOOD_TEXT, FloodGuard
 from bot.knowledge import KB
 from bot.llm import LLMError, ask_llm
 from bot.prompts import build_system_prompt
@@ -29,6 +30,7 @@ log = logging.getLogger(__name__)
 router = Router(name="fallback")
 
 MAX_QUESTION_LEN = 1000  # захист від "простирадл" тексту, які з'їдають ліміт
+flood = FloodGuard(limit=5, window=10)  # не більше 5 запитів до моделі за 10 с від клієнта
 
 
 async def _emergency(message: Message, question: str) -> bool:
@@ -60,8 +62,11 @@ async def ai_answer(message: Message) -> None:
     if await forward_to_admin(message):
         return
 
-    # 2. Ліміти AI. Перевіряємо ДО запиту до моделі — саме він коштує грошей.
-    #    Кнопки меню і передача адміну працюють і далі: обмежуємо AI, а не сервіс.
+    # 2. Флуд і ліміти AI. Перевіряємо ДО запиту до моделі — саме він коштує грошей.
+    #    Кнопки меню, невідкладний стан і передача адміну працюють і далі: обмежуємо AI, а не сервіс.
+    if not flood.allow(user_id):
+        await message.answer(with_emergency_hint(FLOOD_TEXT), reply_markup=main_menu)
+        return
     limit_text = await limits.check_ai_quota(message.bot, user_id)
     if limit_text:
         # Медичний режим: без моделі невідкладний стан ловить лише список слів (pre_check),
@@ -90,8 +95,9 @@ async def ai_answer(message: Message) -> None:
     # В історію пишемо те, що клієнт РЕАЛЬНО побачив. Якби там лишилося «передам заявку»,
     # модель бачила б власний приклад і повторювала його.
     await history.add(user_id, "assistant", client_text or HANDOFF_MARK)
-    log.info("user=%s | Q: %s | A: %s | model=%s | final=%s",
-             user_id, question[:80], reply.answer[:80], reply.reason.value, reason.value)
+    # Без тексту питання й відповіді: логи хостингу не чистяться через 30 днів, як база.
+    log.info("user=%s | питання %s симв. | model=%s | final=%s",
+             user_id, len(question), reply.reason.value, reason.value)
 
     # parse_mode=None: відповідь моделі — звичайний текст. Якщо модель випадково
     # напише "<" чи "&", HTML-режим Telegram зламався б і повідомлення не пішло б.

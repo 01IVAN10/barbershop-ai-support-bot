@@ -27,7 +27,10 @@ async def drop_last(user_id: int) -> None:
     await db.delete_last_message(user_id)
 
 
-async def purge_old() -> int:
-    """Листування клієнтів — персональні дані. Зберігаємо стільки, скільки потрібно
-    для роботи, а не «про всяк випадок». Для реального клієнта строк погоджуємо з ним."""
-    return await db.purge_old_messages(RETENTION_DAYS)
+async def purge_old() -> tuple[int, int]:
+    """Листування й імена клієнтів — персональні дані. Зберігаємо стільки, скільки потрібно
+    для роботи, а не «про всяк випадок». Для реального клієнта строк погоджуємо з ним.
+    Повертає (видалено повідомлень, видалено клієнтів)."""
+    messages = await db.purge_old_messages(RETENTION_DAYS)
+    users = await db.purge_inactive_users(RETENTION_DAYS)
+    return messages, users

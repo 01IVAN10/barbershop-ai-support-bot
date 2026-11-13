@@ -106,7 +106,7 @@ async def request_handoff(message: Message, reason: Reason, question: str) -> No
         await send_emergency(message, question)
         return
     user = message.from_user
-    log.info("HANDOFF | user=%s | reason=%s | q=%s", user.id, reason.value, question[:100])
+    log.info("HANDOFF | user=%s | reason=%s", user.id, reason.value)
 
     if ADMIN_CHAT_ID is None:  # адмін-група не налаштована → телефон
         await _fallback_phone(message, reason)
