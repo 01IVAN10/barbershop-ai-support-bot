@@ -8,6 +8,7 @@
 - AI лишається для вільних питань («а можна з собакою?»).
 Такий гібрид — аргумент для клієнта: дешевше і надійніше, ніж «усе через AI».
 """
+import hashlib
 from html import escape as _escape
 
 import yaml
@@ -114,16 +115,61 @@ def format_price_list() -> str:
     з файлу як є: кнопка не може «помилитися» з ціною.
     """
     p = KB["prices"]
-    lines = [f"<b>{escape(p.get('title', 'Ціни'))}</b>"]
+    lines = [_price_title(p)]
     for section in p["sections"]:
-        lines += ["", f"<b>{escape(section['name'])}</b>"]
-        for item in section["items"]:
-            price = item["price"]
-            price_text = f"{price} ₴" if isinstance(price, int) else str(price)
-            lines.append(f"• {escape(item['name'])} — {escape(price_text)}")
-    for note in p.get("notes", []):
+        lines += ["", *_section_lines(section)]
+    return "\n".join(lines + _price_notes(p))
+
+
+# ---------- прайс по розділах (кнопка з by_sections: true) ----------
+# Функції приймають прайс параметром — так їх можна перевірити тестами на будь-яких даних.
+
+def _price_title(prices: dict) -> str:
+    return f"<b>{escape(prices.get('title', 'Ціни'))}</b>"
+
+
+def _section_lines(section: dict) -> list[str]:
+    lines = [f"<b>{escape(section['name'])}</b>"]
+    for item in section["items"]:
+        price = item["price"]
+        price_text = f"{price} ₴" if isinstance(price, int) else str(price)
+        lines.append(f"• {escape(item['name'])} — {escape(price_text)}")
+    return lines
+
+
+def _price_notes(prices: dict) -> list[str]:
+    lines = []
+    for note in prices.get("notes", []):
         lines += ["", f"<i>{escape(note)}</i>"]
-    return "\n".join(lines)
+    return lines
+
+
+def price_section_label(section: dict) -> str:
+    """Підпис кнопки розділу: `button` з YAML або назва без уточнення в дужках.
+
+    «Стаціонар (24 години; категорію визначає лікар…)» → «Стаціонар».
+    """
+    return section.get("button") or section["name"].split(" (")[0]
+
+
+def prices_version(prices: dict) -> str:
+    """Коротка «мітка» прайсу. Змінився прайс у YAML — змінилася мітка,
+    і стара кнопка в чаті вже не покаже не той розділ."""
+    raw = yaml.safe_dump(prices, allow_unicode=True, sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()[:8]
+
+
+def format_price_sections_intro(prices: dict, outdated: bool = False) -> str:
+    hint = "Прайс оновився — оберіть розділ ще раз:" if outdated else "Оберіть розділ:"
+    return f"{_price_title(prices)}\n\n{hint}"
+
+
+def format_price_section(prices: dict, index: int) -> str | None:
+    """Один розділ прайсу + загальні примітки. None — такого розділу немає."""
+    sections = prices["sections"]
+    if not 0 <= index < len(sections):
+        return None
+    return "\n".join([_price_title(prices), "", *_section_lines(sections[index]), *_price_notes(prices)])
 
 
 def format_emergency() -> str:

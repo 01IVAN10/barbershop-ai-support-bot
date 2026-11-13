@@ -43,7 +43,7 @@ TICKET_IDLE_HOURS = 2
 # YAML може перевизначити будь-який рядок: ui.handoff_texts.<reason>, ui.handoff_confirm.
 CLIENT_TEXT = {
     Reason.BOOKING: "📅 Записом займається адміністратор.",
-    Reason.HUMAN_REQUEST: "👤 Звісно.",
+    Reason.HUMAN_REQUEST: "👤 Підключаю адміністратора.",
     Reason.COMPLAINT: "🙏 Нам шкода, що так вийшло.",
     Reason.NO_INFO: "🙋 На це питання краще відповість адміністратор.",
     Reason.MEDICAL: SAFETY.get("medical_text", "").strip(),
