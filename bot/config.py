@@ -53,6 +53,8 @@ class Config:
     gemini_api_key: str
     gemini_model: str
     admin_chat_id: int | None  # ID адмін-групи; None → передача адміну лише телефоном
+    # Хто з учасників адмін-групи може писати клієнтам, /close і /stats. Порожньо — будь-хто з групи.
+    admin_ids: frozenset[int]
     db_path: str
     # Ліміти AI-відповідей (крок 7). Кнопки меню й передача адміну — без лімітів.
     ai_limit_user_hour: int    # скільки AI-відповідей один клієнт може отримати за годину
@@ -85,6 +87,15 @@ def _optional_int(name: str) -> int | None:
         sys.exit(f"❌ {name} має бути цілим числом, а зараз: {value!r}")
 
 
+def _int_set(name: str) -> frozenset[int]:
+    """Список чисел через кому: "123, 456" → {123, 456}. Порожньо → порожня множина."""
+    value = os.getenv(name, "").strip()
+    try:
+        return frozenset(int(x) for x in value.replace(" ", "").split(",") if x)
+    except ValueError:
+        sys.exit(f"❌ {name} — це Telegram ID через кому (напр. 123456789,987654321), а зараз: {value!r}")
+
+
 def _int_with_default(name: str, default: int) -> int:
     value = _optional_int(name)
     return default if value is None else value
@@ -99,6 +110,7 @@ def load_config() -> Config:
         gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
         admin_chat_id=_optional_int("ADMIN_CHAT_ID"),
+        admin_ids=_int_set("ADMIN_IDS"),
         db_path=os.getenv("DB_PATH", "storage/bot.db"),
         ai_limit_user_hour=_int_with_default("AI_LIMIT_USER_HOUR", 20),
         ai_limit_global_day=_int_with_default("AI_LIMIT_GLOBAL_DAY", 300),
@@ -116,5 +128,6 @@ if __name__ == "__main__":
     print(f"   GEMINI_API_KEY: {cfg.gemini_api_key[:6]}…")
     print(f"   GEMINI_MODEL:   {cfg.gemini_model}")
     print(f"   ADMIN_CHAT_ID:  {cfg.admin_chat_id or 'не задано (передача адміну — телефоном)'}")
+    print(f"   ADMIN_IDS:      {', '.join(map(str, sorted(cfg.admin_ids))) or 'не задано (адмін — будь-хто з групи)'}")
     print(f"   DB_PATH:        {cfg.db_path}")
     print(f"   Дані бізнесу:   {business_yaml()[1]}")

@@ -199,7 +199,10 @@ def strip_promises(text: str) -> str:
     dropped = [m for m in _SENTENCE.finditer(text) if PROMISE_PATTERNS.search(m.group())]
     if not dropped:
         return text.strip()
-    log.warning("Прибрано обіцянку з відповіді моделі: %r", " ".join(m.group() for m in dropped))
+    # У лог — лише довжина: відповідь моделі може повторити ім'я чи телефон клієнта,
+    # а логи хостингу не чистяться через 30 днів, як база (history.purge_old).
+    log.warning("Прибрано обіцянку з відповіді моделі: речень %s, %s симв.",
+                len(dropped), sum(len(m.group()) for m in dropped))
     for m in reversed(dropped):  # з кінця, щоб позиції попередніх речень не зсувались
         start, end = m.start(), m.end()
         while end < len(text) and text[end] in " \t":  # пробіл після вирізаного речення
@@ -262,7 +265,7 @@ def resolve(question: str, answer: str, reason: Reason) -> tuple[Reason, str]:
             log.warning("Симптом у питанні — медичне питання, а не %s", reason.value)
             reason = Reason.MEDICAL
         elif reason in (Reason.NONE, Reason.NO_INFO) and has_medical_advice(answer):
-            log.warning("Прибрано медичну пораду з відповіді моделі: %r", answer[:200])
+            log.warning("Прибрано медичну пораду з відповіді моделі (%s симв.)", len(answer))
             reason = Reason.MEDICAL
     elif reason in MEDICAL_REASONS:  # бізнес без медичного режиму: таких причин не буває
         reason = Reason.NO_INFO
@@ -273,7 +276,7 @@ def resolve(question: str, answer: str, reason: Reason) -> tuple[Reason, str]:
     if reason == Reason.NONE and not text:
         # Від відповіді нічого не лишилося: уся вона була обіцянкою «передам адміністратору»
         # або модель повернула порожній текст. Мовчати не можна — передаємо людині по-справжньому.
-        log.warning("Порожня відповідь без передачі — передаємо як no_info: %r", answer[:200])
+        log.warning("Порожня відповідь без передачі — передаємо як no_info (було %s симв.)", len(answer))
         reason = Reason.NO_INFO
     return reason, text
 

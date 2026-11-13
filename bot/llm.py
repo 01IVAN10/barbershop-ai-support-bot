@@ -116,7 +116,9 @@ async def ask_llm(system_prompt: str, history: list[dict]) -> BotReply:
         try:
             parsed = _RESPONSE_SCHEMA.model_validate_json(response.text or "")
         except ValidationError as e:
-            log.error("Модель повернула не той формат: %r", (response.text or "")[:300])
+            # Без самого тексту: у ньому може бути відповідь клієнту з його даними.
+            log.error("Модель повернула не той формат (%s симв.): %s",
+                      len(response.text or ""), e.errors(include_input=False)[:3])
             raise LLMError("Неправильний формат відповіді") from e
     reply = BotReply(answer=parsed.answer, needs_human=parsed.needs_human,
                      reason=Reason(parsed.reason.value))

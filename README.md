@@ -149,6 +149,7 @@ python -m tests.run_eval                  # AI-відповіді на живі�
 | `GEMINI_API_KEY` | так | ключ Google AI Studio |
 | `GEMINI_MODEL` | ні | за замовчуванням `gemini-3.5-flash-lite` |
 | `ADMIN_CHAT_ID` | ні | ID адмін-групи; без нього передача — телефоном |
+| `ADMIN_IDS` | ні | Telegram ID адмінів через кому; лише вони відповідають клієнтам, `/close`, `/stats`. Порожньо — будь-хто з групи |
 | `DB_PATH` | ні | файл БД (на сервері — на постійному диску) |
 | `AI_LIMIT_USER_HOUR` | ні | AI-відповідей на клієнта за годину (20) |
 | `AI_LIMIT_GLOBAL_DAY` | ні | AI-відповідей на всіх за добу (300) |
