@@ -31,10 +31,24 @@ def _load_buttons() -> dict[str, dict]:
                 raise SystemExit(f"❌ ui.menu: handoff має бути booking або human_request: {btn}")
             if btn.get("by_sections") and btn.get("render") != "price_list":
                 raise SystemExit(f"❌ ui.menu: by_sections працює лише з render: price_list: {btn}")
+            if "render" in btn:
+                _check_render(btn["render"], text)
             buttons[text] = btn
     if not buttons:
         raise SystemExit("❌ ui.menu порожнє: опишіть кнопки в YAML бізнесу")
     return buttons
+
+
+def _check_render(name: str, button: str) -> None:
+    """Будуємо текст кнопки один раз при старті. Рендери чекають певної схеми даних
+    (prices — services з рівнями, contacts — business.address...). Якщо в YAML іншого
+    бізнесу чогось немає, бот має зупинитися з поясненням, а не мовчати на натискання."""
+    try:
+        RENDERERS[name]()
+    except (KeyError, TypeError, AttributeError, IndexError) as e:
+        raise SystemExit(f"❌ ui.menu: кнопка «{button}» (render: {name}) — у YAML бракує даних "
+                         f"або вони іншого формату: {type(e).__name__}: {e}. "
+                         "Заповніть дані або замініть render на reply з готовим текстом.") from e
 
 
 BUTTONS = _load_buttons()

@@ -168,6 +168,17 @@ class RegularBusiness(FallbackCase):
         self.request_handoff.assert_awaited_once_with(message, Reason.NO_INFO, "Є подарункові сертифікати?")
 
 
+class EvalOnly(unittest.IsolatedAsyncioTestCase):
+    async def test_typo_in_only_names_the_scenario(self):
+        """Раніше: --only з помилкою в id → ZeroDivisionError у звіті."""
+        from pathlib import Path
+
+        from tests.run_eval import CASES_FILE, run
+        with self.assertRaises(SystemExit) as stop:
+            await run(1, 0, {"price_haircutt"}, CASES_FILE, Path("unused.md"))
+        self.assertIn("price_haircutt", str(stop.exception))
+
+
 class EvalCheck(unittest.TestCase):
     """Правило тест-набору: клієнт мусить щось побачити (tests/run_eval.py: check)."""
 

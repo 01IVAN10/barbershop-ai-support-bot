@@ -128,6 +128,9 @@ async def run(repeat: int, delay: float, only: set[str] | None,
               cases_file: Path, report_file: Path) -> None:
     cases = yaml.safe_load(cases_file.read_text(encoding="utf-8"))
     if only:
+        unknown = only - {c["id"] for c in cases}
+        if unknown:
+            raise SystemExit(f"❌ --only: немає сценаріїв {', '.join(sorted(unknown))} у {cases_file}")
         cases = [c for c in cases if c["id"] in only]
     model = load_config().gemini_model
     print(f"Модель: {model} | сценаріїв: {len(cases)} | повторів: {repeat} | "

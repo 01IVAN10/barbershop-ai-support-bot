@@ -6,8 +6,6 @@
   handoff — передача адміністратору (запис або «покличте людину»).
 Прайс із by_sections: true — спершу кнопки розділів, ціни — по одному розділу.
 """
-from contextlib import suppress
-
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
@@ -90,9 +88,13 @@ def price_callback_view(data: PriceSection) -> tuple[str, InlineKeyboardMarkup]:
 async def price_section(query: CallbackQuery, callback_data: PriceSection) -> None:
     text, keyboard = price_callback_view(callback_data)
     if isinstance(query.message, Message):
-        # «message is not modified» — клієнт двічі натиснув ту саму кнопку; це не помилка.
-        with suppress(TelegramBadRequest):
+        try:
             await query.message.edit_text(text, reply_markup=keyboard, disable_web_page_preview=True)
+        except TelegramBadRequest as e:
+            # «message is not modified» — клієнт двічі натиснув ту саму кнопку; це не помилка.
+            # Будь-яку іншу (зламана розмітка, задовгий текст) не ховаємо.
+            if "message is not modified" not in str(e):
+                raise
     else:  # повідомлення надто старе, Telegram його вже не віддає — надсилаємо нове
         await query.bot.send_message(query.from_user.id, text, reply_markup=keyboard,
                                      disable_web_page_preview=True)

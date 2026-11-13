@@ -22,10 +22,22 @@ from aiogram.exceptions import TelegramAPIError
 
 from bot import db
 from bot.config import load_config
+from bot.knowledge import UI
 
 log = logging.getLogger(__name__)
 _cfg = load_config()
 
+def _admin_button_hint() -> str:
+    """«…або натисніть «👤 Адміністратор»» — з тим текстом кнопки, що в меню ЦЬОГО бізнесу.
+    Раніше назва кнопки барбершопу була зашита в код, а в клініки кнопка називається інакше."""
+    for row in UI.get("menu", []):
+        for btn in row:
+            if btn.get("handoff") == "human_request":
+                return f" або натисніть «{btn['text']}» — відповість людина"
+    return ""
+
+
+_ADMIN_HINT = _admin_button_hint()
 _admin_warned_on: date | None = None  # щоб попередити адміна про денний ліміт лише раз на день
 
 
@@ -36,15 +48,13 @@ async def check_ai_quota(bot: Bot, user_id: int) -> str | None:
         log.warning("Денний ліміт AI вичерпано: %s/%s", used_global, _cfg.ai_limit_global_day)
         await _warn_admin_once(bot, used_global)
         return ("Зараз помічник перевантажений 🙏\n"
-                "Скористайтеся кнопками меню — там ціни, графік і адреса, — "
-                "або натисніть «👤 Адміністратор».")
+                f"Скористайтеся кнопками меню{_ADMIN_HINT}.")
 
     used_user = await db.count_questions(since_hours=1, user_id=user_id)
     if used_user >= _cfg.ai_limit_user_hour:
         log.info("Ліміт клієнта %s: %s/%s за годину", user_id, used_user, _cfg.ai_limit_user_hour)
         return ("Ви поставили багато питань за останню годину 🙂\n"
-                "Ціни, графік і адреса — у кнопках меню, а на інші питання "
-                "відповість адміністратор: «👤 Адміністратор».")
+                f"Скористайтеся кнопками меню{_ADMIN_HINT}.")
     return None
 
 

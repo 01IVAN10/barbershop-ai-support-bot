@@ -10,6 +10,7 @@
 """
 import hashlib
 from html import escape as _escape
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -39,8 +40,44 @@ def load_knowledge() -> dict:
     kb = yaml.safe_load(text)
     if not isinstance(kb, dict) or "business" not in kb:
         raise SystemExit(f"❌ База знань ({source}) має містити розділ business")
+    problems = check_required(kb)
+    if problems:
+        raise SystemExit(f"❌ База знань ({source}):\n  - " + "\n  - ".join(problems))
     kb["_source"] = source
     return kb
+
+
+def _get(kb: dict, path: str):
+    """kb["a"]["b"] за шляхом "a.b"; None, якщо чогось немає."""
+    node = kb
+    for key in path.split("."):
+        if not isinstance(node, dict) or key not in node:
+            return None
+        node = node[key]
+    return node
+
+
+# Без чого бот не працює взагалі — незалежно від кнопок меню.
+REQUIRED = {
+    "business.name": "назва бізнесу (логи, картки адміну)",
+    "business.phone": "запасний телефон: його отримує клієнт, коли модель чи адмін-група недоступні",
+    "schedule.timezone": "часовий пояс (напр. Europe/Kyiv): без нього падає КОЖНЕ вільне питання",
+    "ui.start_text": "текст /start",
+    "ui.help_text": "текст /help",
+    "ui.demo_text": "текст /demo",
+}
+
+
+def check_required(kb: dict) -> list[str]:
+    """Чого бракує в YAML. Помилка має з'явитися при старті, а не в клієнта на питанні."""
+    problems = [f"немає {path} — {why}" for path, why in REQUIRED.items() if not _get(kb, path)]
+    tz = _get(kb, "schedule.timezone")
+    if tz:
+        try:
+            ZoneInfo(tz)
+        except (ZoneInfoNotFoundError, ValueError):
+            problems.append(f"schedule.timezone: невідомий часовий пояс {tz!r}")
+    return problems
 
 
 # Завантажуємо при імпорті модуля: якщо YAML зламаний — бот впаде одразу (fail fast).
@@ -67,7 +104,8 @@ def format_prices() -> str:
         lines.append(f"   {escape(prices)}")
         if s.get("note"):
             lines.append(f"   <i>{escape(s['note'])}</i>")
-    lines += ["", "Ціна залежить від рівня майстра."]
+    if any(len(s["price"]) > 1 for s in KB["services"]):  # кілька цін на послугу — від рівня майстра
+        lines += ["", "Ціна залежить від рівня майстра."]
     return "\n".join(lines)
 
 
@@ -95,15 +133,13 @@ def format_masters() -> str:
 
 def format_contacts() -> str:
     b = KB["business"]
-    return "\n".join([
-        "<b>📍 Як нас знайти</b>",
-        "",
-        f"{escape(b['city'])}, {escape(b['address'])}",
-        escape(b["landmark"]),
-        "",
-        f"📞 {escape(b['phone'])}",
-        f"Instagram: {escape(b['instagram'])}",
-    ])
+    lines = ["<b>📍 Як нас знайти</b>", "", f"{escape(b['city'])}, {escape(b['address'])}"]
+    if b.get("landmark"):
+        lines.append(escape(b["landmark"]))
+    lines += ["", f"📞 {escape(b['phone'])}"]
+    if b.get("instagram"):
+        lines.append(f"Instagram: {escape(b['instagram'])}")
+    return "\n".join(lines)
 
 
 def format_payment() -> str:
