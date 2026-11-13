@@ -11,7 +11,14 @@ import unittest
 from unittest.mock import patch
 
 from bot import guards
-from bot.guards import detect_emergency, detect_symptom, has_medical_advice, pre_check, resolve
+from bot.guards import (
+    detect_emergency,
+    detect_symptom,
+    has_medical_advice,
+    pre_check,
+    resolve,
+    strip_promises,
+)
 from bot.llm import Reason
 
 MEDICAL_ON = {
@@ -166,6 +173,31 @@ class ResolveRegularBusiness(unittest.TestCase):
     def test_promises_are_stripped(self):
         _, text = resolve("Є сертифікати?", "Такої інформації немає. Я передам ваше питання.", Reason.NONE)
         self.assertEqual(text, "Такої інформації немає.")
+
+
+class StripPromises(unittest.TestCase):
+    """Фільтр обіцянок вирізає лише речення з обіцянкою і не чіпає решту тексту."""
+
+    def test_text_without_promises_is_unchanged(self):
+        for text in [
+            "Повний прайс: https://example.com.ua/prices/ Остаточну вартість визначає лікар.",
+            "Доза 1.5 мл? Ні, це скаже лікар.",
+            "Ціни:\n- Стрижка — 650 грн\n- Борода — 400 грн\n\nЗапис через адміністратора.",
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(strip_promises(text), text)
+
+    def test_promise_removed_link_kept(self):
+        text = "Прайс: https://example.com.ua/prices/. Я передам ваше питання адміну. Гарного дня!"
+        self.assertEqual(strip_promises(text), "Прайс: https://example.com.ua/prices/. Гарного дня!")
+
+    def test_promise_on_own_line_keeps_other_lines(self):
+        text = "Стрижка — 650 грн.\nЯ вас запишу на завтра.\nАдреса: вул. Прикладна, 1."
+        self.assertEqual(strip_promises(text), "Стрижка — 650 грн.\nАдреса: вул. Прикладна, 1.")
+
+    def test_english_promise_removed(self):
+        text = "We don't have that info. I'll pass your question to the admin."
+        self.assertEqual(strip_promises(text), "We don't have that info.")
 
 
 if __name__ == "__main__":

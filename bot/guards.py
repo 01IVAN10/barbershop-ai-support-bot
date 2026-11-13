@@ -34,8 +34,9 @@ PROMISE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Речення = текст до . ! ? (разом із розділовим знаком)
-_SENTENCE = re.compile(r"[^.!?]+[.!?]*")
+# Речення закінчується на . ! ? лише перед пробілом чи кінцем тексту, або кінцем рядка.
+# Тому крапки всередині посилань і чисел («example.com.ua», «1.5») речення не ріжуть.
+_SENTENCE = re.compile(r"\S.*?(?:[.!?]+(?=\s|$)|(?=\n)|$)", re.DOTALL)
 
 # Ціна у тексті: «950 ₴», «1 000 грн». Той самий вираз використовує тест-набір.
 PRICE_RE = re.compile(r"(\d[\d\s]{0,6}\d|\d)\s*(?:грн|uah|₴|hryvn)", re.IGNORECASE)
@@ -103,13 +104,22 @@ MEDICAL_ADVICE_RE = re.compile(
 
 
 def strip_promises(text: str) -> str:
-    """Прибирає речення з обіцянками дій. Решту тексту залишає як є."""
-    kept, dropped = [], []
-    for sentence in _SENTENCE.findall(text):
-        (dropped if PROMISE_PATTERNS.search(sentence) else kept).append(sentence)
-    if dropped:
-        log.warning("Прибрано обіцянку з відповіді моделі: %r", " ".join(s.strip() for s in dropped))
-    return " ".join(s.strip() for s in kept).strip()
+    """Прибирає речення з обіцянками дій. Решту тексту залишає як є — з посиланнями,
+    числами і переносами рядків (раніше текст склеювався заново і ламав «example.com.ua»)."""
+    dropped = [m for m in _SENTENCE.finditer(text) if PROMISE_PATTERNS.search(m.group())]
+    if not dropped:
+        return text.strip()
+    log.warning("Прибрано обіцянку з відповіді моделі: %r", " ".join(m.group() for m in dropped))
+    for m in reversed(dropped):  # з кінця, щоб позиції попередніх речень не зсувались
+        start, end = m.start(), m.end()
+        while end < len(text) and text[end] in " \t":  # пробіл після вирізаного речення
+            end += 1
+        if (start == 0 or text[start - 1] == "\n") and text[end:end + 1] == "\n":
+            end += 1  # речення займало весь рядок — прибираємо і сам рядок
+        text = text[:start] + text[end:]
+    text = re.sub(r"[ \t]+(?=\n)", "", text)  # пробіли в кінці рядка
+    text = re.sub(r"\n{3,}", "\n\n", text)  # порожні рядки на місці вирізаних
+    return text.strip()
 
 
 def detect_emergency(text: str) -> bool:
