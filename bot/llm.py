@@ -31,7 +31,8 @@ def _get_client() -> genai.Client:
     global _client
     if _client is None:
         require_secrets(_config, "gemini_api_key")
-        _client = genai.Client(api_key=_config.gemini_api_key)
+        _client = genai.Client(api_key=_config.gemini_api_key,
+                               http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS))
     return _client
 
 
@@ -40,6 +41,9 @@ def _get_client() -> genai.Client:
 # 400/401/404 НЕ повторюємо: неправильний ключ чи модель не виправляться самі.
 RETRY_CODES = {429, 500, 503}
 RETRY_DELAYS = [1.5, 4]  # секунди перед 2-ю і 3-ю спробою; разом клієнт чекає максимум ~6 с
+# Скільки чекати одну відповідь Gemini. Без межі (у SDK за замовчуванням її немає) зависле
+# з'єднання тримало б клієнта з «друкує...» нескінченно. Звичайна відповідь — 1–3 с.
+REQUEST_TIMEOUT_MS = 30_000
 
 
 # Медичний режим вмикається в YAML бізнесу. Без нього модель навіть не бачить цих причин.
@@ -117,10 +121,23 @@ async def ask_llm(system_prompt: str, history: list[dict]) -> BotReply:
     reply = BotReply(answer=parsed.answer, needs_human=parsed.needs_human,
                      reason=Reason(parsed.reason.value))
 
-    # Захист від суперечностей: «людина не потрібна», але причина вказана — і навпаки.
-    if reply.needs_human and reply.reason == Reason.NONE:
+    return _consistent(reply)
+
+
+def _consistent(reply: BotReply) -> BotReply:
+    """Захист від суперечностей: «людина не потрібна», але причина вказана — і навпаки.
+
+    Медичну причину (emergency, medical_question) НЕ відкидаємо, навіть якщо модель
+    написала needs_human = false: у сумнівному випадку безпечніше дати телефон і людину,
+    ніж показати клієнту текст моделі про стан тварини.
+    """
+    if reply.reason in MEDICAL_REASONS:
+        if not reply.needs_human:
+            log.warning("Модель: needs_human=false, але reason=%s — лишаю причину", reply.reason.value)
+        reply.needs_human = True
+    elif reply.needs_human and reply.reason == Reason.NONE:
         reply.reason = Reason.NO_INFO
-    if not reply.needs_human:
+    elif not reply.needs_human:
         reply.reason = Reason.NONE
     return reply
 
