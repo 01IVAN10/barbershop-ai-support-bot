@@ -62,16 +62,16 @@ class Config:
     developer_contact: str
 
 
-def _require(name: str) -> str:
-    """Повертає змінну або зупиняє програму з зрозумілою помилкою.
+def require_secrets(cfg: Config, *fields: str) -> None:
+    """Зупиняє програму зі зрозумілою помилкою, якщо секрету немає.
 
     Принцип "fail fast": краще впасти одразу при старті з чітким
     повідомленням, ніж через годину на першому повідомленні клієнта.
+    fields — назви полів Config: "bot_token", "gemini_api_key".
     """
-    value = os.getenv(name, "").strip()
-    if not value:
-        sys.exit(f"❌ Не задано {name}. Заповни його у файлі .env (див. .env.example)")
-    return value
+    missing = [f.upper() for f in fields if not getattr(cfg, f)]
+    if missing:
+        sys.exit(f"❌ Не задано {', '.join(missing)}. Заповни у файлі .env (див. .env.example)")
 
 
 def _optional_int(name: str) -> int | None:
@@ -91,9 +91,12 @@ def _int_with_default(name: str, default: int) -> int:
 
 
 def load_config() -> Config:
+    """Читає налаштування. Секрети тут НЕ обов'язкові: модулі викликають load_config()
+    при імпорті, і юніт-тести мають запускатися на свіжому клоні без .env.
+    Наявність секретів перевіряє require_secrets() — при старті бота (fail fast)."""
     return Config(
-        bot_token=_require("BOT_TOKEN"),
-        gemini_api_key=_require("GEMINI_API_KEY"),
+        bot_token=os.getenv("BOT_TOKEN", "").strip(),
+        gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
         admin_chat_id=_optional_int("ADMIN_CHAT_ID"),
         db_path=os.getenv("DB_PATH", "storage/bot.db"),
@@ -106,6 +109,7 @@ def load_config() -> Config:
 
 if __name__ == "__main__":
     cfg = load_config()
+    require_secrets(cfg, "bot_token", "gemini_api_key")
     # Ніколи не друкуємо секрети повністю — лише перші символи для перевірки.
     print("✅ Конфіг завантажено")
     print(f"   BOT_TOKEN:      {cfg.bot_token[:6]}…")

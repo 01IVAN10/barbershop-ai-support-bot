@@ -15,7 +15,8 @@
 import logging
 import re
 
-from bot.knowledge import SAFETY
+from bot.knowledge import SAFETY, medical_mode
+from bot.reasons import MEDICAL_REASONS, Reason
 
 log = logging.getLogger(__name__)
 
@@ -225,23 +226,18 @@ def has_medical_advice(text: str) -> bool:
     return bool(MEDICAL_ADVICE_RE.search(text))
 
 
-def medical_mode() -> bool:
-    return bool(SAFETY.get("medical"))
-
-
-def pre_check(question: str):
+def pre_check(question: str) -> Reason | None:
     """Перевірка ДО моделі. Повертає Reason.EMERGENCY або None.
 
     Невідкладний стан не чекає на модель: телефон клієнт отримує одразу,
     навіть якщо Gemini недоступний чи ліміт вичерпано.
     """
-    from bot.llm import Reason  # тут, а не нагорі: guards не має залежати від llm при імпорті
     if medical_mode() and detect_emergency(question):
         return Reason.EMERGENCY
     return None
 
 
-def resolve(question: str, answer: str, reason):
+def resolve(question: str, answer: str, reason: Reason) -> tuple[Reason, str]:
     """Останнє слово за КОДОМ: яка причина насправді і що з тексту моделі побачить клієнт.
 
     Повертає (reason, text). needs_human = reason != none. text може бути порожнім —
@@ -259,8 +255,6 @@ def resolve(question: str, answer: str, reason):
       текст моделі НЕ показуємо, лише фіксований безпечний текст;
     - решта: текст моделі без обіцянок дій (+ примітка до ціни, якщо задана).
     """
-    from bot.llm import MEDICAL_REASONS, Reason
-
     if medical_mode():
         if detect_emergency(question):
             reason = Reason.EMERGENCY

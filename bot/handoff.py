@@ -27,8 +27,8 @@ from aiogram.types import Message, User
 from bot import db, history
 from bot.config import load_config
 from bot.keyboards import main_menu
-from bot.knowledge import KB, SAFETY, UI
-from bot.llm import Reason
+from bot.knowledge import KB, SAFETY, UI, medical_mode
+from bot.reasons import Reason
 
 log = logging.getLogger(__name__)
 ADMIN_CHAT_ID = load_config().admin_chat_id
@@ -54,7 +54,7 @@ HANDOFF_CONFIRM = (UI.get("handoff_confirm") or (
     "✅ Передав ваше звернення адміністратору — він відповість тут, у цьому чаті.\n"
     "Усе, що напишете далі, побачить адміністратор.")).strip()
 EMERGENCY_TEXT = SAFETY.get("emergency_text", "").strip()
-if SAFETY.get("medical") and not (EMERGENCY_TEXT and CLIENT_TEXT[Reason.MEDICAL]):
+if medical_mode() and not (EMERGENCY_TEXT and CLIENT_TEXT[Reason.MEDICAL]):
     raise SystemExit("❌ safety.medical: true потребує safety.emergency_text і safety.medical_text")
 
 # Як причина виглядає для адміна
@@ -71,7 +71,7 @@ ADMIN_LABEL = {
 def with_emergency_hint(text: str) -> str:
     """Медичний режим: до відмови (напр. «ліміт вичерпано») додаємо телефон для
     невідкладних випадків. Клієнт, якому бот не відповів, не має лишитися без номера."""
-    if not SAFETY.get("medical"):
+    if not medical_mode():
         return text
     return f"{text}\n\n{EMERGENCY_TEXT}"
 

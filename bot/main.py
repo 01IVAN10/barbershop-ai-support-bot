@@ -13,7 +13,7 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 
 from bot import db, history
-from bot.config import load_config
+from bot.config import load_config, require_secrets
 from bot.handoff import check_admin_chat
 from bot.handlers import admin, fallback, menu, start
 from bot.knowledge import KB, UI
@@ -60,6 +60,7 @@ async def main() -> None:
         stream=sys.stdout,
     )
     config = load_config()
+    require_secrets(config, "bot_token", "gemini_api_key")  # fail fast: без них бот не має сенсу
 
     # parse_mode=HTML за замовчуванням: можна писати <b>жирний</b> у будь-якій відповіді.
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))

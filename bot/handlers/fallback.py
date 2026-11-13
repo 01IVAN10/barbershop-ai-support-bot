@@ -21,8 +21,9 @@ from bot.guards import pre_check, resolve
 from bot.handoff import HANDOFF_MARK, forward_to_admin, request_handoff, with_emergency_hint
 from bot.keyboards import main_menu
 from bot.knowledge import KB
-from bot.llm import LLMError, Reason, ask_llm
+from bot.llm import LLMError, ask_llm
 from bot.prompts import build_system_prompt
+from bot.reasons import Reason
 
 log = logging.getLogger(__name__)
 router = Router(name="fallback")

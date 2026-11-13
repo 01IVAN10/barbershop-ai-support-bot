@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from bot import guards, handoff
 from bot.handlers import fallback
-from bot.llm import Reason
+from bot.reasons import Reason
 from tests.run_eval import check
 
 MEDICAL_ON = {"medical": True}

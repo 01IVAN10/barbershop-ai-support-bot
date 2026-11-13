@@ -49,6 +49,11 @@ UI: dict = KB.get("ui") or {}
 SAFETY: dict = KB.get("safety") or {}
 
 
+def medical_mode() -> bool:
+    """Чи ввімкнено медичний режим (safety.medical: true). Єдине місце, де це визначається."""
+    return bool(SAFETY.get("medical"))
+
+
 def facts() -> dict:
     """Лише факти про бізнес — те, що бачить модель (без службових розділів)."""
     return {k: v for k, v in KB.items() if k not in SERVICE_KEYS and not k.startswith("_")}

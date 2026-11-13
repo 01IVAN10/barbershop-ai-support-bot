@@ -30,12 +30,13 @@ from pathlib import Path
 
 import yaml
 
-from bot.config import load_config
+from bot.config import load_config, require_secrets
 from bot.guards import PRICE_RE, pre_check, resolve, strip_promises
 from bot.handoff import client_notice
 from bot.knowledge import facts
-from bot.llm import LLMError, Reason, ask_llm
+from bot.llm import LLMError, ask_llm
 from bot.prompts import build_system_prompt
+from bot.reasons import Reason
 
 CASES_FILE = Path(__file__).parent / "eval_cases.yaml"
 
@@ -215,6 +216,7 @@ def main() -> None:
     parser.add_argument("--report", type=Path, default=None,
                         help="куди записати звіт (за замовчуванням eval_report.md поруч зі сценаріями)")
     args = parser.parse_args()
+    require_secrets(load_config(), "gemini_api_key")  # без ключа кожен сценарій упав би помилкою API
     only = {x.strip() for x in args.only.split(",") if x.strip()} or None
     report = args.report or args.cases.parent / "eval_report.md"
     # Лише помилки: попередження фільтра обіцянок і так рахуються у звіті.

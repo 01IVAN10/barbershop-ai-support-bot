@@ -19,7 +19,7 @@ from bot.guards import (
     resolve,
     strip_promises,
 )
-from bot.llm import Reason
+from bot.reasons import Reason
 
 MEDICAL_ON = {
     "medical": True,

@@ -16,7 +16,7 @@ from bot.handoff import BUTTON_PREFIX, request_handoff
 from bot.keyboards import BUTTONS, PriceSection, price_back_keyboard, price_sections_keyboard
 from bot.knowledge import (KB, RENDERERS, format_price_section, format_price_sections_intro,
                            prices_version)
-from bot.llm import Reason
+from bot.reasons import Reason
 
 router = Router(name="menu")
 

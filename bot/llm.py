@@ -14,15 +14,25 @@ from pydantic import BaseModel, Field, ValidationError, create_model
 from google import genai
 from google.genai import errors, types
 
-from bot.config import load_config
-from bot.knowledge import SAFETY
+from bot.config import load_config, require_secrets
+from bot.knowledge import medical_mode
+from bot.reasons import MEDICAL_REASONS, Reason
 
 log = logging.getLogger(__name__)
 
 _config = load_config()
-# Клієнт створюємо один раз: він тримає з'єднання, створювати його на кожне
-# повідомлення — повільно і марнотратно.
-_client = genai.Client(api_key=_config.gemini_api_key)
+_client: genai.Client | None = None
+
+
+def _get_client() -> genai.Client:
+    """Клієнт створюємо один раз: він тримає з'єднання, створювати його на кожне
+    повідомлення — повільно і марнотратно. Але не при імпорті, а при першому запиті:
+    тоді модуль (і юніт-тести) завантажуються без ключа API."""
+    global _client
+    if _client is None:
+        require_secrets(_config, "gemini_api_key")
+        _client = genai.Client(api_key=_config.gemini_api_key)
+    return _client
 
 
 # Тимчасові збої, після яких має сенс повторити запит:
@@ -32,21 +42,8 @@ RETRY_CODES = {429, 500, 503}
 RETRY_DELAYS = [1.5, 4]  # секунди перед 2-ю і 3-ю спробою; разом клієнт чекає максимум ~6 с
 
 
-class Reason(str, Enum):
-    """Чому потрібна людина. Фіксований список — щоб код міг на це реагувати."""
-    NONE = "none"                    # людина не потрібна
-    NO_INFO = "no_info"              # відповіді немає в базі знань
-    BOOKING = "booking"              # запис, перенесення, скасування
-    HUMAN_REQUEST = "human_request"  # клієнт сам просить живу людину
-    COMPLAINT = "complaint"          # скарга, конфлікт, негатив
-    # Лише для бізнесів із safety.medical: true (ветклініка тощо):
-    EMERGENCY = "emergency"          # невідкладний стан — клієнту одразу телефон, без «чекайте»
-    MEDICAL = "medical_question"     # симптоми, стан, ліки, лікування — тільки людина
-
-
-MEDICAL_REASONS = {Reason.EMERGENCY, Reason.MEDICAL}
 # Медичний режим вмикається в YAML бізнесу. Без нього модель навіть не бачить цих причин.
-MEDICAL_MODE = bool(SAFETY.get("medical"))
+MEDICAL_MODE = medical_mode()
 
 _ANSWER_DESC = (
     "Текст для клієнта. Без обіцянок дій: не пиши «передам», «запишу», "
@@ -134,7 +131,7 @@ async def _generate_with_retry(system_prompt: str, contents: list):
         try:
             # client.aio — асинхронна версія: поки чекаємо відповідь Gemini (1–3 с),
             # бот обслуговує інших клієнтів, а не "зависає".
-            return await _client.aio.models.generate_content(
+            return await _get_client().aio.models.generate_content(
                 model=_config.gemini_model,
                 contents=contents,
                 config=types.GenerateContentConfig(
