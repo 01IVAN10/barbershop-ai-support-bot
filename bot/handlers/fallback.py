@@ -2,7 +2,8 @@
 Усе, що не впіймали кнопки, — вільні питання.
 
 Порядок:
-0. Медичний режим і невідкладний стан? → телефон ОДРАЗУ, без моделі, без лімітів.
+0. Медичний режим і невідкладний стан (у тексті або в підписі до фото)? → телефон ОДРАЗУ,
+   без моделі, без лімітів.
 1. Відкрите звернення до адміна? → повідомлення йде адміну, AI мовчить.
 2. Інакше відповідає AI; рішення про передачу людині приймає КОД (guards.resolve).
 
@@ -17,7 +18,7 @@ from aiogram.utils.chat_action import ChatActionSender
 
 from bot import history, limits
 from bot.guards import pre_check, resolve
-from bot.handoff import HANDOFF_MARK, forward_to_admin, request_handoff
+from bot.handoff import HANDOFF_MARK, forward_to_admin, request_handoff, with_emergency_hint
 from bot.keyboards import main_menu
 from bot.knowledge import KB
 from bot.llm import LLMError, Reason, ask_llm
@@ -29,6 +30,21 @@ router = Router(name="fallback")
 MAX_QUESTION_LEN = 1000  # захист від "простирадл" тексту, які з'їдають ліміт
 
 
+async def _emergency(message: Message, question: str) -> bool:
+    """Невідкладний стан у тексті клієнта → телефон йому + картка адміну. True — оброблено.
+
+    Одна функція для тексту і для підпису до фото: раніше підпис не перевірявся взагалі,
+    і фото рани з підписом «собаку збила машина» отримувало «я розумію лише текст».
+    """
+    pre = pre_check(question)
+    if pre is None:
+        return False
+    await request_handoff(message, pre, question)  # телефон клієнту + картка адміну
+    await history.add(message.from_user.id, "user", question)
+    await history.add(message.from_user.id, "assistant", HANDOFF_MARK)
+    return True
+
+
 @router.message(F.text)
 async def ai_answer(message: Message) -> None:
     user_id = message.from_user.id
@@ -36,11 +52,7 @@ async def ai_answer(message: Message) -> None:
 
     # 0. Невідкладний стан — раніше за все: навіть якщо клієнт зараз «у адміна»
     #    (адмін вночі може не читати), ліміт вичерпано чи модель недоступна.
-    pre = pre_check(question)
-    if pre is not None:
-        await request_handoff(message, pre, question)  # телефон клієнту + картка адміну
-        await history.add(user_id, "user", question)
-        await history.add(user_id, "assistant", HANDOFF_MARK)
+    if await _emergency(message, question):
         return
 
     # 1. Клієнт уже розмовляє з адміном — не втручаємося.
@@ -51,7 +63,9 @@ async def ai_answer(message: Message) -> None:
     #    Кнопки меню і передача адміну працюють і далі: обмежуємо AI, а не сервіс.
     limit_text = await limits.check_ai_quota(message.bot, user_id)
     if limit_text:
-        await message.answer(limit_text, reply_markup=main_menu)
+        # Медичний режим: без моделі невідкладний стан ловить лише список слів (pre_check),
+        # а він не знає всіх формулювань. Тому відмова через ліміт не ховає телефон.
+        await message.answer(with_emergency_hint(limit_text), reply_markup=main_menu)
         return
 
     await history.add(user_id, "user", question)
@@ -89,7 +103,14 @@ async def ai_answer(message: Message) -> None:
 
 @router.message()
 async def non_text(message: Message) -> None:
-    """Фото, стікери, голосові: адміну — якщо звернення відкрите, інакше підказка."""
+    """Фото, стікери, голосові: адміну — якщо звернення відкрите, інакше підказка.
+
+    Підпис до фото чи відео — теж текст клієнта: невідкладний стан перевіряємо і в ньому.
+    """
+    caption = (message.caption or "").strip()[:MAX_QUESTION_LEN]
+    if caption and await _emergency(message, caption):
+        await forward_to_admin(message)  # звернення відкрите → адмін побачить і саме фото
+        return
     if await forward_to_admin(message):
         return
     await message.answer(

@@ -68,6 +68,14 @@ ADMIN_LABEL = {
 }
 
 
+def with_emergency_hint(text: str) -> str:
+    """Медичний режим: до відмови (напр. «ліміт вичерпано») додаємо телефон для
+    невідкладних випадків. Клієнт, якому бот не відповів, не має лишитися без номера."""
+    if not SAFETY.get("medical"):
+        return text
+    return f"{text}\n\n{EMERGENCY_TEXT}"
+
+
 def client_notice(reason: Reason) -> str:
     """Фіксований текст, який клієнт бачить при передачі (звичайний шлях, нове звернення).
 

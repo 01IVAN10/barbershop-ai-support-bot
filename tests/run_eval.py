@@ -86,6 +86,11 @@ def check(case: dict, reason: Reason, text: str) -> list[str]:
     t = _norm(text)
     needs_human = reason != Reason.NONE
 
+    # Клієнт мусить щось побачити — у КОЖНОМУ сценарії. Без цього правила набір показував
+    # 100%, поки фільтр обіцянок вирізав відповідь цілком і клієнт отримував порожнечу.
+    if not text.strip():
+        problems.append("клієнт нічого не побачив (порожня відповідь)")
+
     if needs_human != case["needs_human"]:
         problems.append(f"needs_human={needs_human}, очікувалось {case['needs_human']}")
 
