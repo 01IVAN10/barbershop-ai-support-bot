@@ -140,6 +140,26 @@
   must_contain: ["650", "850", ["barber", "haircut", "costs", "price"]]
   must_not_contain: ["re:[а-яіїєґ]{4,}"]   # жодного українського слова — відповідь англійською
 
+# Відповіді, де в базі знань є порада клієнту («краще уточнити», «уточнює адміністратор»).
+# Фільтр обіцянок колись вирізав їх цілком — клієнт не бачив нічого.
+- id: walk_in
+  category: факти
+  question: Чи можна прийти без запису?
+  needs_human: false
+  must_contain: [["вільн", "вікн"]]
+
+- id: walk_in_casual
+  category: факти
+  question: А якщо я просто зайду без запису, мене приймуть?
+  needs_human: false
+  must_contain: [["вільн", "вікн"]]
+
+- id: styling_products
+  category: факти
+  question: Чи продаєте засоби для укладки?
+  needs_human: false
+  must_contain: [["віск", "глин", "олі"]]
+
 # ---------- Діалог з контекстом ----------
 - id: context_followup
   category: контекст

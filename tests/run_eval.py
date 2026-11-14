@@ -30,12 +30,13 @@ from pathlib import Path
 
 import yaml
 
-from bot.config import load_config
+from bot.config import load_config, require_secrets
 from bot.guards import PRICE_RE, pre_check, resolve, strip_promises
 from bot.handoff import client_notice
 from bot.knowledge import facts
-from bot.llm import LLMError, Reason, ask_llm
+from bot.llm import LLMError, ask_llm
 from bot.prompts import build_system_prompt
+from bot.reasons import Reason
 
 CASES_FILE = Path(__file__).parent / "eval_cases.yaml"
 
@@ -86,6 +87,11 @@ def check(case: dict, reason: Reason, text: str) -> list[str]:
     t = _norm(text)
     needs_human = reason != Reason.NONE
 
+    # Клієнт мусить щось побачити — у КОЖНОМУ сценарії. Без цього правила набір показував
+    # 100%, поки фільтр обіцянок вирізав відповідь цілком і клієнт отримував порожнечу.
+    if not text.strip():
+        problems.append("клієнт нічого не побачив (порожня відповідь)")
+
     if needs_human != case["needs_human"]:
         problems.append(f"needs_human={needs_human}, очікувалось {case['needs_human']}")
 
@@ -122,6 +128,9 @@ async def run(repeat: int, delay: float, only: set[str] | None,
               cases_file: Path, report_file: Path) -> None:
     cases = yaml.safe_load(cases_file.read_text(encoding="utf-8"))
     if only:
+        unknown = only - {c["id"] for c in cases}
+        if unknown:
+            raise SystemExit(f"❌ --only: немає сценаріїв {', '.join(sorted(unknown))} у {cases_file}")
         cases = [c for c in cases if c["id"] in only]
     model = load_config().gemini_model
     print(f"Модель: {model} | сценаріїв: {len(cases)} | повторів: {repeat} | "
@@ -210,6 +219,7 @@ def main() -> None:
     parser.add_argument("--report", type=Path, default=None,
                         help="куди записати звіт (за замовчуванням eval_report.md поруч зі сценаріями)")
     args = parser.parse_args()
+    require_secrets(load_config(), "gemini_api_key")  # без ключа кожен сценарій упав би помилкою API
     only = {x.strip() for x in args.only.split(",") if x.strip()} or None
     report = args.report or args.cases.parent / "eval_report.md"
     # Лише помилки: попередження фільтра обіцянок і так рахуються у звіті.

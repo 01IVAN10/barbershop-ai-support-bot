@@ -20,7 +20,7 @@ python -m bot.config                                 # перевірити на
 
 python -m unittest discover -s tests -v              # усі юніт-тести, без моделі, ~1 с
 uvx ruff check bot tests                             # лінтер (ruff не в requirements)
-python -m tests.run_eval                             # eval барбершопу: 34×3 на живій моделі, ~9 хв
+python -m tests.run_eval                             # eval барбершопу: 37×3 на живій моделі, ~10 хв
 BUSINESS_FILE=private/<бізнес>/business.yaml \
   python -m tests.run_eval --cases private/<бізнес>/eval_cases.yaml
 ```

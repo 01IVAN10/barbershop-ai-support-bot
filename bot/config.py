@@ -53,6 +53,8 @@ class Config:
     gemini_api_key: str
     gemini_model: str
     admin_chat_id: int | None  # ID адмін-групи; None → передача адміну лише телефоном
+    # Хто з учасників адмін-групи може писати клієнтам, /close і /stats. Порожньо — будь-хто з групи.
+    admin_ids: frozenset[int]
     db_path: str
     # Ліміти AI-відповідей (крок 7). Кнопки меню й передача адміну — без лімітів.
     ai_limit_user_hour: int    # скільки AI-відповідей один клієнт може отримати за годину
@@ -62,16 +64,16 @@ class Config:
     developer_contact: str
 
 
-def _require(name: str) -> str:
-    """Повертає змінну або зупиняє програму з зрозумілою помилкою.
+def require_secrets(cfg: Config, *fields: str) -> None:
+    """Зупиняє програму зі зрозумілою помилкою, якщо секрету немає.
 
     Принцип "fail fast": краще впасти одразу при старті з чітким
     повідомленням, ніж через годину на першому повідомленні клієнта.
+    fields — назви полів Config: "bot_token", "gemini_api_key".
     """
-    value = os.getenv(name, "").strip()
-    if not value:
-        sys.exit(f"❌ Не задано {name}. Заповни його у файлі .env (див. .env.example)")
-    return value
+    missing = [f.upper() for f in fields if not getattr(cfg, f)]
+    if missing:
+        sys.exit(f"❌ Не задано {', '.join(missing)}. Заповни у файлі .env (див. .env.example)")
 
 
 def _optional_int(name: str) -> int | None:
@@ -85,17 +87,30 @@ def _optional_int(name: str) -> int | None:
         sys.exit(f"❌ {name} має бути цілим числом, а зараз: {value!r}")
 
 
+def _int_set(name: str) -> frozenset[int]:
+    """Список чисел через кому: "123, 456" → {123, 456}. Порожньо → порожня множина."""
+    value = os.getenv(name, "").strip()
+    try:
+        return frozenset(int(x) for x in value.replace(" ", "").split(",") if x)
+    except ValueError:
+        sys.exit(f"❌ {name} — це Telegram ID через кому (напр. 123456789,987654321), а зараз: {value!r}")
+
+
 def _int_with_default(name: str, default: int) -> int:
     value = _optional_int(name)
     return default if value is None else value
 
 
 def load_config() -> Config:
+    """Читає налаштування. Секрети тут НЕ обов'язкові: модулі викликають load_config()
+    при імпорті, і юніт-тести мають запускатися на свіжому клоні без .env.
+    Наявність секретів перевіряє require_secrets() — при старті бота (fail fast)."""
     return Config(
-        bot_token=_require("BOT_TOKEN"),
-        gemini_api_key=_require("GEMINI_API_KEY"),
+        bot_token=os.getenv("BOT_TOKEN", "").strip(),
+        gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
         admin_chat_id=_optional_int("ADMIN_CHAT_ID"),
+        admin_ids=_int_set("ADMIN_IDS"),
         db_path=os.getenv("DB_PATH", "storage/bot.db"),
         ai_limit_user_hour=_int_with_default("AI_LIMIT_USER_HOUR", 20),
         ai_limit_global_day=_int_with_default("AI_LIMIT_GLOBAL_DAY", 300),
@@ -106,11 +121,13 @@ def load_config() -> Config:
 
 if __name__ == "__main__":
     cfg = load_config()
+    require_secrets(cfg, "bot_token", "gemini_api_key")
     # Ніколи не друкуємо секрети повністю — лише перші символи для перевірки.
     print("✅ Конфіг завантажено")
     print(f"   BOT_TOKEN:      {cfg.bot_token[:6]}…")
     print(f"   GEMINI_API_KEY: {cfg.gemini_api_key[:6]}…")
     print(f"   GEMINI_MODEL:   {cfg.gemini_model}")
     print(f"   ADMIN_CHAT_ID:  {cfg.admin_chat_id or 'не задано (передача адміну — телефоном)'}")
+    print(f"   ADMIN_IDS:      {', '.join(map(str, sorted(cfg.admin_ids))) or 'не задано (адмін — будь-хто з групи)'}")
     print(f"   DB_PATH:        {cfg.db_path}")
     print(f"   Дані бізнесу:   {business_yaml()[1]}")

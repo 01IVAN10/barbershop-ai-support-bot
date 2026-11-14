@@ -19,7 +19,7 @@ from bot.guards import (
     resolve,
     strip_promises,
 )
-from bot.llm import Reason
+from bot.reasons import Reason
 
 MEDICAL_ON = {
     "medical": True,
@@ -47,6 +47,62 @@ class EmergencyDetection(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(detect_emergency(text))
 
+    def test_typical_emergencies_from_review(self):
+        """Формулювання, які pre_check пропускав: без моделі їх не ловив ніхто."""
+        for text in [
+            "Кіт потрапив під машину",
+            "Собаку переїхала машина",
+            "Кота вкусила змія",
+            "Собака з'їла шоколад",
+            "Кіт з'їв мої таблетки",
+            "Кіт зламав лапу",
+            "У собаки перелом лапи",
+            "У собаки тепловий удар",
+            "Кота вдарило струмом",
+            "Собака втратила свідомість",
+            "Собаці паралізувало задні лапи",
+            "У кота кров із рота",
+            "Кішка не може народити",
+            "My cat collapsed",
+        ]:
+            with self.subTest(text=text):
+                self.assertTrue(detect_emergency(text))
+
+    def test_other_wordings_of_emergencies(self):
+        """Ті самі стани іншими словами: інший порядок слів, інший апостроф, інша мова."""
+        for text in [
+            "Машина збила собаку",
+            "Собаку збило авто",
+            "Собака попала під колеса",
+            "Кіт впав з 5 поверху",
+            "Кіт випив антифриз",
+            "Собака наїлась шоколаду",
+            "Кіт з’їв лілію",
+            "Кіт подавився кісткою",
+            "У кота кров з носа",
+            "Кіт блює кров'ю",
+            "Пес наступив на скло, сильно тече кров",
+            "У собаки глибока рана",
+            "Кішка не може розродитися",
+            "Кіт упав і не встає",
+            "Собака не може встати",
+            "У кота відмовили задні лапи",
+            "Собака зомліла",
+            "Собака не приходить до тями",
+            "Пес перегрівся на сонці",
+            "Кіт обпік лапу",
+            "Собаку покусали інші собаки",
+            "Собаку вкусила оса",
+            "У кота піна з рота",
+            "У собаки роздуло живіт",
+            "Кіт не може попісяти",
+            "Кота придавило дверима",
+            "My dog ate chocolate",
+            "The dog has a broken leg",
+        ]:
+            with self.subTest(text=text):
+                self.assertTrue(detect_emergency(text))
+
     def test_ordinary_questions_are_not_emergencies(self):
         for text in [
             "Скільки коштує вакцинація?",
@@ -55,6 +111,24 @@ class EmergencyDetection(unittest.TestCase):
             "Де ви знаходитесь?",
             "Ви працюєте вночі?",
             "Чи можна оплатити карткою?",
+        ]:
+            with self.subTest(text=text):
+                self.assertFalse(detect_emergency(text))
+
+    def test_similar_words_are_not_emergencies(self):
+        """Слова, схожі на невідкладні: клієнт питає про послугу, а не про біду."""
+        for text in [
+            "Скільки коштує прийом травматолога?",
+            "Чи є у вас травматологія?",
+            "Do you have a traumatologist?",
+            "Збираюсь приїхати машиною, де припаркуватись?",
+            "Ми переїхали в інший район, чи можна перенести картку?",
+            "Чи можна здати кров з вени натще?",
+            "Чи можна взяти тварину під опіку?",
+            "Чи можна собаці шоколад?",
+            "Кіт з'їв весь корм, скільки коштує дієтичний?",
+            "Скільки коштує рентген лапи?",
+            "Чи можна оплатити більшу суму частинами?",
         ]:
             with self.subTest(text=text):
                 self.assertFalse(detect_emergency(text))
@@ -69,6 +143,10 @@ class SymptomDetection(unittest.TestCase):
             "Собаку нудить",
             "The cat is vomiting",
             "Які ліки дати собаці?",
+            "У кота сильний біль",
+            "Собаці боляче ходити",
+            "У собаки болить живіт",
+            "Кіт млявий і тремтить",
         ]:
             with self.subTest(text=text):
                 self.assertTrue(detect_symptom(text))
@@ -82,6 +160,30 @@ class SymptomDetection(unittest.TestCase):
         ]:
             with self.subTest(text=text):
                 self.assertFalse(detect_symptom(text))
+
+    def test_words_that_only_look_like_symptoms(self):
+        """«біль» не має ловити «більше», а «температура» й «ліки» — питання про клініку."""
+        for text in [
+            "Чи дорожче стерилізація для собак більше 20 кг?",
+            "Чи можна оплатити більшу суму частинами?",
+            "Більш детально про стаціонар можна?",
+            "Яка температура в стаціонарі?",
+            "Чи є аптека, де купити ліки?",
+        ]:
+            with self.subTest(text=text):
+                self.assertFalse(detect_symptom(text))
+
+    def test_ambiguous_words_about_the_pet_are_symptoms(self):
+        """Ті самі «температура» й «ліки», але вже про тварину — це медичне питання."""
+        for text in [
+            "У кота температура",
+            "Температура 40, що робити?",
+            "У собаки піднялась температура",
+            "Чи можна давати людські ліки?",
+            "Є ліки для кота від глистів?",
+        ]:
+            with self.subTest(text=text):
+                self.assertTrue(detect_symptom(text))
 
 
 class MedicalAdviceDetection(unittest.TestCase):
@@ -143,6 +245,18 @@ class ResolveMedicalMode(unittest.TestCase):
         _, text = resolve("Де ви?", "вул. Прикладна, 1.", Reason.NONE)
         self.assertEqual(text, "вул. Прикладна, 1.")
 
+    def test_price_question_with_weight_is_answered(self):
+        """«більше 20 кг» — не «біль»: клієнт бачить ціни, а не «я не оцінюю стан тварини»."""
+        answer = "Так: 10–30 кг — 4400 ₴, понад 30 кг — 5500 ₴."
+        reason, text = resolve("Чи дорожче стерилізація для собак більше 20 кг?", answer, Reason.NONE)
+        self.assertEqual(reason, Reason.NONE)
+        self.assertTrue(text.startswith(answer))
+
+    def test_traumatologist_is_not_an_emergency(self):
+        self.assertIsNone(pre_check("Скільки коштує прийом травматолога?"))
+        reason, _ = resolve("Скільки коштує прийом травматолога?", "Такої ціни в мене немає.", Reason.NO_INFO)
+        self.assertEqual(reason, Reason.NO_INFO)
+
 
 @patch.dict(guards.SAFETY, {}, clear=True)
 class ResolveRegularBusiness(unittest.TestCase):
@@ -174,6 +288,28 @@ class ResolveRegularBusiness(unittest.TestCase):
         _, text = resolve("Є сертифікати?", "Такої інформації немає. Я передам ваше питання.", Reason.NONE)
         self.assertEqual(text, "Такої інформації немає.")
 
+    def test_advice_from_knowledge_base_reaches_client(self):
+        """Відповідь з одного речення з порадою «уточнити» — це факт із бази, а не обіцянка.
+        Раніше фільтр вирізав її цілком: клієнт не бачив нічого і нікому нічого не передавалось."""
+        answer = "Без запису — лише якщо є вільне вікно, тому краще уточнити заздалегідь."
+        reason, text = resolve("Чи можна прийти без запису?", answer, Reason.NONE)
+        self.assertEqual((reason, text), (Reason.NONE, answer))
+
+    def test_answer_that_is_only_a_promise_goes_to_human(self):
+        """Від відповіді нічого не лишилось → пара (none, "") неможлива: передаємо людині."""
+        reason, text = resolve("Є сертифікати?", "Я передам ваше питання адміністратору.", Reason.NONE)
+        self.assertEqual((reason, text), (Reason.NO_INFO, ""))
+
+    def test_empty_model_answer_goes_to_human(self):
+        reason, text = resolve("Є сертифікати?", "  ", Reason.NONE)
+        self.assertEqual((reason, text), (Reason.NO_INFO, ""))
+
+    def test_client_always_gets_text_or_human(self):
+        for answer in ["", "Уточню.", "Зараз з'єдную з адміністратором.", "Так, можна.", "Краще уточнити."]:
+            with self.subTest(answer=answer):
+                reason, text = resolve("питання", answer, Reason.NONE)
+                self.assertTrue(text or reason != Reason.NONE)
+
 
 class StripPromises(unittest.TestCase):
     """Фільтр обіцянок вирізає лише речення з обіцянкою і не чіпає решту тексту."""
@@ -198,6 +334,38 @@ class StripPromises(unittest.TestCase):
     def test_english_promise_removed(self):
         text = "We don't have that info. I'll pass your question to the admin."
         self.assertEqual(strip_promises(text), "We don't have that info.")
+
+    def test_advice_to_client_is_not_a_promise(self):
+        """Порада клієнту, що зробити самому, — не обіцянка бота. Ці фрази є в базах знань."""
+        for text in [
+            "Без запису — лише якщо є вільне вікно, тому краще уточнити заздалегідь.",
+            "Так, на ресепшені є віск. Асортимент і ціни уточнює адміністратор.",
+            "Зателефонувати або написати в месенджер: клініка підбере зручний час.",
+            "Запишіться через кнопку «Записатися» або зв'яжіться з нами за телефоном.",
+            "Уточнюйте наявність за телефоном.",
+            "Зателефонуйте дорогою — лікар підготує все до приїзду.",
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(strip_promises(text), text)
+
+    def test_real_promises_are_still_removed(self):
+        """Перша особа і «адміністратор зв'яжеться» — те, чого бот не виконує."""
+        for text in [
+            "Я передам ваше питання адміністратору.",
+            "Передаю ваше питання.",
+            "Зараз з'єдную вас з адміністратором.",
+            "Адміністратор зв’яжеться з вами.",
+            "Адміністратор звʼяжеться з вами.",      # апостроф ʼ (U+02BC) — ним пише частина клавіатур
+            "З вами зв'яжуться найближчим часом.",
+            "Я вас запишу на завтра.",
+            "Я записав вас на 15:00.",
+            "Ми уточнимо і повідомимо.",
+            "Адміністратор вам зателефонує.",
+            "Ми вам передзвонимо.",
+            "We will contact you soon.",
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(strip_promises(text), "")
 
 
 if __name__ == "__main__":

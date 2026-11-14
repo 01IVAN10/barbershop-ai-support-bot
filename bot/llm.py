@@ -14,15 +14,26 @@ from pydantic import BaseModel, Field, ValidationError, create_model
 from google import genai
 from google.genai import errors, types
 
-from bot.config import load_config
-from bot.knowledge import SAFETY
+from bot.config import load_config, require_secrets
+from bot.knowledge import medical_mode
+from bot.reasons import MEDICAL_REASONS, Reason
 
 log = logging.getLogger(__name__)
 
 _config = load_config()
-# Клієнт створюємо один раз: він тримає з'єднання, створювати його на кожне
-# повідомлення — повільно і марнотратно.
-_client = genai.Client(api_key=_config.gemini_api_key)
+_client: genai.Client | None = None
+
+
+def _get_client() -> genai.Client:
+    """Клієнт створюємо один раз: він тримає з'єднання, створювати його на кожне
+    повідомлення — повільно і марнотратно. Але не при імпорті, а при першому запиті:
+    тоді модуль (і юніт-тести) завантажуються без ключа API."""
+    global _client
+    if _client is None:
+        require_secrets(_config, "gemini_api_key")
+        _client = genai.Client(api_key=_config.gemini_api_key,
+                               http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS))
+    return _client
 
 
 # Тимчасові збої, після яких має сенс повторити запит:
@@ -30,23 +41,13 @@ _client = genai.Client(api_key=_config.gemini_api_key)
 # 400/401/404 НЕ повторюємо: неправильний ключ чи модель не виправляться самі.
 RETRY_CODES = {429, 500, 503}
 RETRY_DELAYS = [1.5, 4]  # секунди перед 2-ю і 3-ю спробою; разом клієнт чекає максимум ~6 с
+# Скільки чекати одну відповідь Gemini. Без межі (у SDK за замовчуванням її немає) зависле
+# з'єднання тримало б клієнта з «друкує...» нескінченно. Звичайна відповідь — 1–3 с.
+REQUEST_TIMEOUT_MS = 30_000
 
 
-class Reason(str, Enum):
-    """Чому потрібна людина. Фіксований список — щоб код міг на це реагувати."""
-    NONE = "none"                    # людина не потрібна
-    NO_INFO = "no_info"              # відповіді немає в базі знань
-    BOOKING = "booking"              # запис, перенесення, скасування
-    HUMAN_REQUEST = "human_request"  # клієнт сам просить живу людину
-    COMPLAINT = "complaint"          # скарга, конфлікт, негатив
-    # Лише для бізнесів із safety.medical: true (ветклініка тощо):
-    EMERGENCY = "emergency"          # невідкладний стан — клієнту одразу телефон, без «чекайте»
-    MEDICAL = "medical_question"     # симптоми, стан, ліки, лікування — тільки людина
-
-
-MEDICAL_REASONS = {Reason.EMERGENCY, Reason.MEDICAL}
 # Медичний режим вмикається в YAML бізнесу. Без нього модель навіть не бачить цих причин.
-MEDICAL_MODE = bool(SAFETY.get("medical"))
+MEDICAL_MODE = medical_mode()
 
 _ANSWER_DESC = (
     "Текст для клієнта. Без обіцянок дій: не пиши «передам», «запишу», "
@@ -115,15 +116,30 @@ async def ask_llm(system_prompt: str, history: list[dict]) -> BotReply:
         try:
             parsed = _RESPONSE_SCHEMA.model_validate_json(response.text or "")
         except ValidationError as e:
-            log.error("Модель повернула не той формат: %r", (response.text or "")[:300])
+            # Без самого тексту: у ньому може бути відповідь клієнту з його даними.
+            log.error("Модель повернула не той формат (%s симв.): %s",
+                      len(response.text or ""), e.errors(include_input=False)[:3])
             raise LLMError("Неправильний формат відповіді") from e
     reply = BotReply(answer=parsed.answer, needs_human=parsed.needs_human,
                      reason=Reason(parsed.reason.value))
 
-    # Захист від суперечностей: «людина не потрібна», але причина вказана — і навпаки.
-    if reply.needs_human and reply.reason == Reason.NONE:
+    return _consistent(reply)
+
+
+def _consistent(reply: BotReply) -> BotReply:
+    """Захист від суперечностей: «людина не потрібна», але причина вказана — і навпаки.
+
+    Медичну причину (emergency, medical_question) НЕ відкидаємо, навіть якщо модель
+    написала needs_human = false: у сумнівному випадку безпечніше дати телефон і людину,
+    ніж показати клієнту текст моделі про стан тварини.
+    """
+    if reply.reason in MEDICAL_REASONS:
+        if not reply.needs_human:
+            log.warning("Модель: needs_human=false, але reason=%s — лишаю причину", reply.reason.value)
+        reply.needs_human = True
+    elif reply.needs_human and reply.reason == Reason.NONE:
         reply.reason = Reason.NO_INFO
-    if not reply.needs_human:
+    elif not reply.needs_human:
         reply.reason = Reason.NONE
     return reply
 
@@ -134,7 +150,7 @@ async def _generate_with_retry(system_prompt: str, contents: list):
         try:
             # client.aio — асинхронна версія: поки чекаємо відповідь Gemini (1–3 с),
             # бот обслуговує інших клієнтів, а не "зависає".
-            return await _client.aio.models.generate_content(
+            return await _get_client().aio.models.generate_content(
                 model=_config.gemini_model,
                 contents=contents,
                 config=types.GenerateContentConfig(

@@ -13,11 +13,11 @@ from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 
 from bot import db, history
-from bot.config import load_config
+from bot.config import load_config, require_secrets
 from bot.handoff import check_admin_chat
 from bot.handlers import admin, fallback, menu, start
 from bot.knowledge import KB, UI
-from bot.middlewares import AntiFloodMiddleware, UserTrackingMiddleware
+from bot.middlewares import StaleUpdateMiddleware, UserTrackingMiddleware
 
 
 async def daily_cleanup() -> None:
@@ -26,9 +26,13 @@ async def daily_cleanup() -> None:
     Не лише при старті: на сервері бот може працювати тижнями без перезапуску.
     """
     while True:
-        deleted = await history.purge_old()
-        if deleted:
-            logging.info("Видалено старих повідомлень: %s", deleted)
+        try:
+            messages, users = await history.purge_old()
+            if messages or users:
+                logging.info("Очищення: видалено повідомлень %s, клієнтів %s", messages, users)
+        except Exception:
+            # Раніше одна помилка БД мовчки зупиняла очищення назавжди — до перезапуску.
+            logging.exception("Щоденне очищення не вдалося; повтор через добу")
         await asyncio.sleep(24 * 60 * 60)
 
 
@@ -60,6 +64,7 @@ async def main() -> None:
         stream=sys.stdout,
     )
     config = load_config()
+    require_secrets(config, "bot_token", "gemini_api_key")  # fail fast: без них бот не має сенсу
 
     # parse_mode=HTML за замовчуванням: можна писати <b>жирний</b> у будь-якій відповіді.
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -71,9 +76,10 @@ async def main() -> None:
         r.message.filter(F.chat.type == "private")
 
     # Middleware виконуються в порядку підключення, ДО будь-якого хендлера (див. middlewares.py):
-    # 1) антифлуд — першим, щоб флуд не доходив навіть до бази;
+    # 1) старі повідомлення (бот довго був вимкнений) — відкидаємо;
     # 2) запис клієнта в базу.
-    dp.message.outer_middleware(AntiFloodMiddleware(limit=5, window=10))
+    # Антифлуд — не тут, а в fallback.py, лише перед запитом до моделі.
+    dp.message.outer_middleware(StaleUpdateMiddleware(max_age=10 * 60))
     dp.message.outer_middleware(UserTrackingMiddleware())
 
     # ПОРЯДОК ВАЖЛИВИЙ: admin — для групи; fallback ловить усе, тому він останній.
@@ -90,9 +96,9 @@ async def main() -> None:
 
     await apply_bot_profile(bot)
 
-    # Ігноруємо повідомлення, що прийшли, поки бот був вимкнений,
-    # щоб після перезапуску він не відповідав на старе пачкою.
-    await bot.delete_webhook(drop_pending_updates=True)
+    # Повідомлення, що прийшли під час перезапуску, НЕ викидаємо: старші за 10 хвилин
+    # відкине StaleUpdateMiddleware, решту (відповідь адміна, питання клієнта) обробимо.
+    await bot.delete_webhook(drop_pending_updates=False)
     cleanup_task = asyncio.create_task(daily_cleanup())
     logging.info("Бот запущено")
     try:

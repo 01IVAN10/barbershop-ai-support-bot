@@ -19,6 +19,10 @@ import yaml
 
 from bot.knowledge import KB, facts
 
+# Як назвати пояс у промпті. Пояс береться з YAML (schedule.timezone); раніше «час Києва»
+# був зашитий у код. Для Києва текст той самий — промпт барбершопу не змінюється.
+TZ_NAMES = {"Europe/Kyiv": "час Києва"}
+
 DAYS_FULL_UA = ["понеділок", "вівторок", "середа", "четвер", "п'ятниця", "субота", "неділя"]
 
 # YAML → текст один раз при старті. allow_unicode — щоб кирилиця не стала Б...
@@ -93,10 +97,11 @@ def build_system_prompt() -> str:
 
     Без часу модель не відповість на "ви зараз відкриті?" чи "а завтра працюєте?".
     """
-    now = datetime.now(ZoneInfo(KB["schedule"]["timezone"]))
+    tz = KB["schedule"]["timezone"]
+    now = datetime.now(ZoneInfo(tz))
     now_text = f"{now:%Y-%m-%d %H:%M}, {DAYS_FULL_UA[now.weekday()]}"
     return (
         f"{RULES}\n\n"
-        f"ЗАРАЗ: {now_text} (час Києва).\n\n"
+        f"ЗАРАЗ: {now_text} ({TZ_NAMES.get(tz, f'часовий пояс {tz}')}).\n\n"
         f"=== БАЗА ЗНАНЬ ===\n{KNOWLEDGE_TEXT}"
     )
