@@ -19,7 +19,7 @@ class Consistency(unittest.TestCase):
 
     def test_medical_reason_wins_over_needs_human_false(self):
         """Модель суперечить собі щодо невідкладного стану — обираємо безпечніше: людина."""
-        for reason in (Reason.EMERGENCY, Reason.MEDICAL):
+        for reason in (Reason.EMERGENCY, Reason.MEDICAL, Reason.SENSITIVE):
             with self.subTest(reason=reason):
                 self.assertEqual(self.check(False, reason), (True, reason))
 
@@ -32,6 +32,27 @@ class Consistency(unittest.TestCase):
     def test_consistent_reply_is_unchanged(self):
         self.assertEqual(self.check(True, Reason.BOOKING), (True, Reason.BOOKING))
         self.assertEqual(self.check(False, Reason.NONE), (False, Reason.NONE))
+
+
+class Schema(unittest.TestCase):
+    """Схема відповіді — частина інструкції моделі: нова причина в ній змінила б поведінку."""
+
+    BASE = ["none", "no_info", "booking", "human_request", "complaint"]
+
+    def reasons(self, medical: bool, sensitive: bool = False) -> list[str]:
+        with patch.object(llm, "MEDICAL_MODE", medical), patch.object(llm, "SENSITIVE_MODE", sensitive):
+            schema = llm._response_schema().model_json_schema()
+        return schema["$defs"]["Reason"]["enum"]
+
+    def test_regular_business_schema_is_unchanged(self):
+        self.assertEqual(self.reasons(False), self.BASE)
+
+    def test_medical_schema_is_unchanged(self):
+        self.assertEqual(self.reasons(True), [*self.BASE, "emergency", "medical_question"])
+
+    def test_sensitive_only_with_section(self):
+        self.assertEqual(self.reasons(True, sensitive=True),
+                         [*self.BASE, "emergency", "medical_question", "sensitive"])
 
 
 def _with_key(key: str):

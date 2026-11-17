@@ -258,6 +258,67 @@ class ResolveMedicalMode(unittest.TestCase):
         self.assertEqual(reason, Reason.NO_INFO)
 
 
+SENSITIVE_ON = {
+    **MEDICAL_ON,
+    "sensitive": {"words": ["евтаназ", "присипи", "попрощат", "кремац"], "text": "💙 Нам дуже шкода.",
+                  "describe": "евтаназія чи прощання з твариною"},
+}
+EUTHANASIA_PRICE = "Евтаназія котів та малих собак — 1 500 грн."
+
+
+@patch.dict(guards.SAFETY, SENSITIVE_ON, clear=True)
+class ResolveSensitiveTopic(unittest.TestCase):
+    """safety.sensitive (евтаназія): завжди людина; текст моделі — лише на пряме питання про ціну."""
+
+    def test_price_question_shows_price_and_goes_to_human(self):
+        reason, text = resolve("Скільки коштує евтаназія кота?", EUTHANASIA_PRICE, Reason.NONE)
+        self.assertEqual(reason, Reason.SENSITIVE)
+        self.assertTrue(text.startswith(EUTHANASIA_PRICE))
+        self.assertTrue(text.endswith(MEDICAL_ON["price_disclaimer"]))
+
+    def test_without_price_question_model_text_is_hidden(self):
+        """Клієнт не питав ціну — перелік цін у відповідь на горе недоречний."""
+        for question in ("Думаємо попрощатися з нашою старенькою кішкою, як це відбувається?",
+                         "Чи можна бути поруч під час евтаназії?"):
+            with self.subTest(question=question):
+                self.assertEqual(resolve(question, EUTHANASIA_PRICE, Reason.NO_INFO), (Reason.SENSITIVE, ""))
+
+    def test_sensitive_wins_over_symptom(self):
+        """«Хворіє» — симптом, але людині потрібне співчуття, а не «я не оцінюю стан»."""
+        reason, _ = resolve("Пес старий і хворіє, думаємо його присипити", "", Reason.MEDICAL)
+        self.assertEqual(reason, Reason.SENSITIVE)
+
+    def test_emergency_wins_over_sensitive(self):
+        self.assertEqual(resolve("Кіт помирає, мабуть, треба евтаназія", "", Reason.NONE)[0], Reason.EMERGENCY)
+        self.assertEqual(resolve("Думаємо про евтаназію", "", Reason.EMERGENCY)[0], Reason.EMERGENCY)
+
+    def test_medical_advice_hidden_even_with_price(self):
+        reason, text = resolve("Скільки коштує евтаназія?", "1 500 грн. Дайте коту 5 мг заспокійливого.",
+                               Reason.NONE)
+        self.assertEqual((reason, text), (Reason.SENSITIVE, ""))
+
+    def test_other_questions_unaffected(self):
+        self.assertEqual(resolve("Скільки коштує стерилізація?", "3 000 грн.", Reason.NONE)[0], Reason.NONE)
+
+    def test_model_catches_what_words_miss(self):
+        """Помилка в корені, російська, переказ — слів зі списку немає, але модель поставила sensitive."""
+        reason, text = resolve("Скільки коштує евтоназія кота?", EUTHANASIA_PRICE, Reason.SENSITIVE)
+        self.assertEqual(reason, Reason.SENSITIVE)
+        self.assertTrue(text.startswith(EUTHANASIA_PRICE))  # ціну прямо питали
+        self.assertEqual(resolve("Щоб він не мучився, допоможіть йому піти", EUTHANASIA_PRICE,
+                                 Reason.SENSITIVE), (Reason.SENSITIVE, ""))
+
+    def test_model_sensitive_wins_over_symptom(self):
+        reason, _ = resolve("Кіт старий, болить усе, хочемо щоб заснув назавжди", "", Reason.SENSITIVE)
+        self.assertEqual(reason, Reason.SENSITIVE)
+
+    def test_without_section_nothing_changes(self):
+        with patch.dict(guards.SAFETY, MEDICAL_ON, clear=True):
+            self.assertEqual(resolve("Скільки коштує евтаназія?", EUTHANASIA_PRICE, Reason.NONE)[0], Reason.NONE)
+            # схема такої причини не дасть, але якщо раптом — не «делікатна тема» без тексту з YAML
+            self.assertEqual(resolve("питання", "текст", Reason.SENSITIVE)[0], Reason.NO_INFO)
+
+
 @patch.dict(guards.SAFETY, {}, clear=True)
 class ResolveRegularBusiness(unittest.TestCase):
     """Бізнес без медичного режиму (барбершоп) — поведінка як до змін."""

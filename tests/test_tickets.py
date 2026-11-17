@@ -7,10 +7,17 @@
 потрібну функцію». Строк простою тут — tickets.IDLE_HOURS (з YAML, за замовчуванням 2 години).
 """
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
-from bot import db, tickets
+from bot import db, hours, knowledge, tickets
 from tests.support import THREAD_ID, USER_ID, DbCase, age_ticket
+
+KYIV = ZoneInfo("Europe/Kyiv")
+# Пн–Сб 10–17, неділя вихідний. 2026-11-21 — субота, 2026-11-23 — понеділок.
+CLINIC_SCHEDULE = hours.parse_schedule({"regular": {
+    **{d: "10:00–17:00" for d in hours.WEEKDAYS[:6]}, "sunday": "вихідний"}})
 
 
 class Lifecycle(DbCase):
@@ -72,6 +79,45 @@ class Lifecycle(DbCase):
         self.assertIsNone(await tickets.expire(USER_ID))
 
 
+class WorkingHoursIdle(DbCase):
+    """З графіком простій рахується лише в робочі години (IDLE_HOURS = 2 за замовчуванням)."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        patcher = patch.object(knowledge, "SCHEDULE", CLINIC_SCHEDULE)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        await tickets.remember_topic(USER_ID, THREAD_ID)
+        await tickets.start(USER_ID)
+        # остання активність: субота, 16:55 за Києвом
+        last = datetime(2026, 11, 21, 16, 55, tzinfo=KYIV).astimezone(timezone.utc)
+        await db._db.execute("UPDATE tickets SET updated_at = ? WHERE user_id = ?",
+                             (last.strftime("%Y-%m-%d %H:%M:%S"), USER_ID))
+        await db._db.commit()
+
+    def at(self, day: int, hh: int, mm: int = 0):
+        return patch.object(knowledge, "now", return_value=datetime(2026, 11, day, hh, mm, tzinfo=KYIV))
+
+    async def test_saturday_request_survives_sunday(self):
+        with self.at(22, 20):  # неділя ввечері: 27 годин за годинником, але лише 5 робочих хвилин
+            self.assertIsNone(await tickets.expire(USER_ID))
+            self.assertIsNotNone(await tickets.active(USER_ID))
+            self.assertEqual(await tickets.count_active(), 1)
+
+    async def test_expires_after_working_hours_on_monday(self):
+        with self.at(23, 11, 50):  # 5 хв у суботу + 1 год 50 хв у понеділок < 2 год
+            self.assertIsNone(await tickets.expire(USER_ID))
+        with self.at(23, 12, 0):   # 5 хв + 2 год — строк минув
+            self.assertIsNotNone(await tickets.expire(USER_ID))
+
+    def test_limit_text_says_working_hours(self):
+        self.assertEqual(tickets.idle_limit_text(), f"{tickets.IDLE_HOURS:g} робочих год")
+
+    def test_without_schedule_text_is_unchanged(self):
+        with patch.object(knowledge, "SCHEDULE", None):
+            self.assertEqual(tickets.idle_limit_text(), f"{tickets.IDLE_HOURS:g} год")
+
+
 class IdleHoursSetting(unittest.TestCase):
     def test_default_is_two_hours(self):
         with patch.dict(tickets.UI, {}, clear=True):
@@ -98,8 +144,8 @@ class Stats(DbCase):
         await tickets.start(USER_ID)                     # жива розмова
         await tickets.start(2)
         await age_ticket(tickets.IDLE_HOURS + 1, user_id=2)  # прострочена, але ще значиться open
-        st = await db.stats(tickets.IDLE_HOURS)          # третій клієнт має тему без розмови
-        self.assertEqual((st["tickets_total"], st["tickets_open"]), (3, 1))
+        st = await db.stats()                            # третій клієнт має тему без розмови
+        self.assertEqual((st["tickets_total"], await tickets.count_active()), (3, 1))
         self.assertEqual(st["users_total"], 3)
 
 

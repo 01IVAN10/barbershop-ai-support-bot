@@ -9,11 +9,13 @@
 Такий гібрид — аргумент для клієнта: дешевше і надійніше, ніж «усе через AI».
 """
 import hashlib
+from datetime import datetime
 from html import escape as _escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
+from bot import hours
 from bot.config import business_yaml
 
 
@@ -77,6 +79,49 @@ def check_required(kb: dict) -> list[str]:
             ZoneInfo(tz)
         except (ZoneInfoNotFoundError, ValueError):
             problems.append(f"schedule.timezone: невідомий часовий пояс {tz!r}")
+    return problems + _check_after_hours(kb) + _check_sensitive(kb)
+
+
+def _check_sensitive(kb: dict) -> list[str]:
+    """safety.sensitive — делікатна тема (напр. евтаназія): слова-ознаки і співчутливий текст."""
+    sensitive = _get(kb, "safety.sensitive")
+    if sensitive is None:
+        return []
+    if not isinstance(sensitive, dict):
+        return ["safety.sensitive має бути розділом з words і text"]
+    problems = []
+    words = sensitive.get("words")
+    if not isinstance(words, list) or not words or not all(isinstance(w, str) and w.strip() for w in words):
+        problems.append("safety.sensitive.words — список початків слів, напр. [\"евтаназ\", \"кремац\"]")
+    if not str(sensitive.get("text") or "").strip():
+        problems.append("немає safety.sensitive.text — що бачить клієнт, коли пише на делікатну тему")
+    if not str(sensitive.get("describe") or "").strip():
+        problems.append("немає safety.sensitive.describe — якою темою це є для моделі "
+                        "(вона ловить те, чого немає в words: помилки, інша мова, переказ)")
+    return problems
+
+
+# Тексти, без яких медичний режим поза графіком не стартує (див. _check_after_hours).
+AFTER_HOURS_MEDICAL_KEYS = ("emergency_text", "medical_text")
+
+
+def _check_after_hours(kb: dict) -> list[str]:
+    """Режим «поза графіком» (ui.after_hours): графік має читатися кодом, а для медичного
+    режиму мають бути тексти невідкладного стану й симптомів на неробочий час — без них
+    бот уночі дав би телефон, за яким ніхто не відповість."""
+    after = _get(kb, "ui.after_hours")
+    if after is None:
+        return []
+    if not isinstance(after, dict):
+        return ["ui.after_hours має бути розділом з текстами (key: текст)"]
+    problems = []
+    try:
+        hours.parse_schedule(kb.get("schedule") or {})
+    except hours.ScheduleError as e:
+        problems.append(f"ui.after_hours потребує графіка, який розуміє код: {e}")
+    if _get(kb, "safety.medical"):
+        problems += [f"немає ui.after_hours.{key} — що казати поза графіком у медичному режимі"
+                     for key in AFTER_HOURS_MEDICAL_KEYS if not str(after.get(key) or "").strip()]
     return problems
 
 
@@ -89,6 +134,41 @@ SAFETY: dict = KB.get("safety") or {}
 def medical_mode() -> bool:
     """Чи ввімкнено медичний режим (safety.medical: true). Єдине місце, де це визначається."""
     return bool(SAFETY.get("medical"))
+
+
+def sensitive_mode() -> bool:
+    """Чи є в бізнесу делікатна тема (safety.sensitive). Без неї причини sensitive не буває."""
+    return bool(SAFETY.get("sensitive"))
+
+
+# ---------- робочий час (режим «поза графіком») ----------
+# Вмикається розділом ui.after_hours у YAML. Немає розділу — бізнес вважається завжди
+# на зв'язку, як було досі (барбершоп, цілодобова клініка): тексти не змінюються.
+AFTER_HOURS: dict = UI.get("after_hours") or {}
+SCHEDULE: hours.Schedule | None = hours.parse_schedule(KB["schedule"]) if AFTER_HOURS else None
+
+
+def now() -> datetime:
+    """Поточний час бізнесу. ЄДИНИЙ годинник бота: промпт, тексти й простій звернень
+    беруть час звідси, тож тест-набір може підставити «неділю, 12:00» в одному місці."""
+    return datetime.now(ZoneInfo(KB["schedule"]["timezone"]))
+
+
+def closed_until() -> str | None:
+    """None — бізнес зараз працює (або графіка в коді немає). Інакше — коли відкриється:
+    «завтра з 10:00», «у понеділок з 10:00»."""
+    if SCHEDULE is None:
+        return None
+    moment = now()
+    if hours.is_open(SCHEDULE, moment):
+        return None
+    return hours.describe_opening(moment, hours.next_opening(SCHEDULE, moment))
+
+
+def after_hours_text(key: str, opens: str, default: str = "") -> str:
+    """Текст на неробочий час з ui.after_hours (або запасний з коду), {opens} → коли відкриється."""
+    text = str(AFTER_HOURS.get(key) or default).strip()
+    return text.replace("{opens}", opens)
 
 
 def facts() -> dict:
@@ -112,8 +192,8 @@ def format_prices() -> str:
 def format_schedule() -> str:
     sch = KB["schedule"]
     lines = ["<b>🕐 Графік роботи</b>", ""]
-    for day, hours in sch["regular"].items():
-        lines.append(f"{DAYS_UA[day]}: {hours}")
+    for day, day_hours in sch["regular"].items():
+        lines.append(f"{DAYS_UA[day]}: {day_hours}")
     lines += ["", escape(sch["last_booking"])]
     if sch.get("exceptions"):
         lines += ["", "<b>Особливі дні:</b>"]
@@ -214,7 +294,14 @@ def format_price_section(prices: dict, index: int) -> str | None:
 
 
 def format_emergency() -> str:
-    """Той самий текст, що бот дає при невідкладному стані (safety.emergency_text)."""
+    """Той самий текст, що бот дає при невідкладному стані (safety.emergency_text).
+
+    Поза графіком — ui.after_hours.emergency_text: телефон, за яким зараз ніхто не відповість,
+    у невідкладному випадку гірший за чесне «зачинено, зверніться до цілодобової клініки».
+    """
+    opens = closed_until()
+    if opens is not None:
+        return escape(after_hours_text("emergency_text", opens))
     return escape(SAFETY.get("emergency_text", "").strip())
 
 

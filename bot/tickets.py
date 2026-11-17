@@ -17,8 +17,12 @@
 звернення — тому картка невідкладного стану мусила одразу закривати його назад.
 
 Тут немає Telegram: що сказати клієнту й адміну при переході — справа handoff.py.
+
+Якщо в бізнесу є графік (ui.after_hours у YAML), простій рахується лише в робочі години:
+заявка в суботу о 16:55 не «згорає» за неділю, коли адміністратора немає, — інакше клієнт,
+якому пообіцяли «відповімо в понеділок», у неділю прочитав би «розмову закрито».
 """
-from bot import db
+from bot import db, hours, knowledge
 from bot.db import Ticket
 from bot.knowledge import UI
 
@@ -41,7 +45,21 @@ IDLE_HOURS = _idle_hours()
 
 
 def is_stale(ticket: Ticket) -> bool:
-    return ticket.idle_minutes >= IDLE_HOURS * 60
+    if knowledge.SCHEDULE is None or ticket.updated_at is None:
+        return ticket.idle_minutes >= IDLE_HOURS * 60
+    now = knowledge.now()
+    idle = hours.working_minutes(knowledge.SCHEDULE, ticket.updated_at.astimezone(now.tzinfo), now)
+    return idle >= IDLE_HOURS * 60
+
+
+def idle_limit_text() -> str:
+    """Строк простою словами — для повідомлення адміну про автозакриття: «2 год», «7 робочих год»."""
+    return f"{IDLE_HOURS:g} {'робочих ' if knowledge.SCHEDULE is not None else ''}год"
+
+
+async def count_active() -> int:
+    """Скільки розмов з адміном «живі» зараз (/stats): відкриті й не прострочені."""
+    return sum(not is_stale(t) for t in await db.get_open_tickets())
 
 
 async def get(user_id: int) -> Ticket | None:

@@ -18,6 +18,10 @@
 Невідкладний стан (медичний режим) — окремий шлях send_emergency(): клієнт ОДРАЗУ
 отримує телефон, а адмін — картку 🚨. Клієнта НЕ переводимо в режим «чекайте
 адміністратора»: уночі чат може ніхто не читати, а бот має й далі відповідати.
+
+Поза графіком (ui.after_hours у YAML) кожен текст, що обіцяє людину чи радить телефонувати,
+замінюється чесним: «зараз зачинено, адміністратор відповість, коли відкриємося — завтра з 10:00».
+Це гарантує код за графіком із YAML, а не прохання в промпті.
 """
 import logging
 
@@ -29,7 +33,8 @@ from bot import history, tickets
 from bot.config import load_config
 from bot.db import Ticket
 from bot.keyboards import main_menu
-from bot.knowledge import KB, SAFETY, UI, escape, medical_mode
+from bot.knowledge import (KB, SAFETY, UI, after_hours_text, closed_until, escape, format_emergency,
+                           medical_mode)
 from bot.reasons import Reason
 
 log = logging.getLogger(__name__)
@@ -62,6 +67,9 @@ CLIENT_TEXT = {
     Reason.COMPLAINT: "🙏 Нам шкода, що так вийшло.",
     Reason.NO_INFO: "🙋 На це питання краще відповість адміністратор.",
     Reason.MEDICAL: _safety_text("medical_text"),
+    # Делікатна тема (safety.sensitive.text у YAML). Без розділу ця причина не виникає.
+    Reason.SENSITIVE: (escape(str((SAFETY.get("sensitive") or {}).get("text") or "").strip())
+                       or "💙 Це делікатне питання — його краще обговорити з людиною."),
 }
 for _key, _text in (UI.get("handoff_texts") or {}).items():
     CLIENT_TEXT[Reason(_key)] = _text.strip()
@@ -72,6 +80,26 @@ EMERGENCY_TEXT = _safety_text("emergency_text")
 if medical_mode() and not (EMERGENCY_TEXT and CLIENT_TEXT[Reason.MEDICAL]):
     raise SystemExit("❌ safety.medical: true потребує safety.emergency_text і safety.medical_text")
 
+# Поза графіком (ui.after_hours). {opens} — коли відкриємося: «завтра з 10:00».
+# Будь-який рядок можна перевизначити в YAML: ui.after_hours.<ключ>.
+# Тексти невідкладного стану й симптомів (emergency_text, medical_text) запасних не мають:
+# що радити, коли тварині погано вночі, вирішує автор бізнесу (knowledge._check_after_hours).
+CLOSED_DEFAULTS = {
+    "handoff_confirm": ("🌙 Зараз ми зачинені. Ваше звернення збережено — адміністратор відповість "
+                        "тут, у цьому чаті, коли відкриємося, — {opens}.\n"
+                        "Усе, що напишете далі, побачить адміністратор."),
+    "waiting": ("Ви вже на зв'язку з адміністратором. Зараз ми зачинені — він побачить це "
+                "повідомлення, коли відкриємося, — {opens}."),
+    "call_us": "Зараз ми зачинені. Зателефонувати можна, коли відкриємося, — {opens}: {phone}",
+}
+WAITING_TEXT = "Ви вже на зв'язку з адміністратором — він побачить це повідомлення."
+
+
+def _closed(key: str, opens: str) -> str:
+    return after_hours_text(key, opens, CLOSED_DEFAULTS.get(key, "")).replace(
+        "{phone}", str(KB["business"]["phone"]))
+
+
 # Як причина виглядає для адміна
 ADMIN_LABEL = {
     Reason.BOOKING: "📅 Запис",
@@ -80,7 +108,22 @@ ADMIN_LABEL = {
     Reason.NO_INFO: "❓ Бот не знає відповіді",
     Reason.EMERGENCY: "🚨 НЕВІДКЛАДНИЙ СТАН (клієнту одразу дано телефон)",
     Reason.MEDICAL: "🩺 Медичне питання (бот порад не давав)",
+    Reason.SENSITIVE: "💙 Делікатна тема — бот передав людині",
 }
+
+
+def emergency_text() -> str:
+    """Що бачить клієнт при невідкладному стані: телефон, а поза графіком — текст на
+    неробочий час (той самий, що показує кнопка меню, knowledge.format_emergency)."""
+    return EMERGENCY_TEXT if closed_until() is None else format_emergency()
+
+
+def _reason_text(reason: Reason, opens: str | None) -> str:
+    """Перший рядок повідомлення про передачу. Медичний текст радить телефонувати —
+    поза графіком він теж замінюється (ui.after_hours.medical_text)."""
+    if reason == Reason.MEDICAL and opens is not None:
+        return escape(after_hours_text("medical_text", opens))
+    return CLIENT_TEXT[reason]
 
 
 def with_emergency_hint(text: str) -> str:
@@ -88,17 +131,43 @@ def with_emergency_hint(text: str) -> str:
     невідкладних випадків. Клієнт, якому бот не відповів, не має лишитися без номера."""
     if not medical_mode():
         return text
-    return f"{text}\n\n{EMERGENCY_TEXT}"
+    return f"{text}\n\n{emergency_text()}"
 
 
 def client_notice(reason: Reason) -> str:
     """Фіксований текст, який клієнт бачить при передачі (звичайний шлях, нове звернення).
 
     Окрема функція, бо її використовує і тест-набір: перевіряємо те, що бачить клієнт.
+    Поза графіком — «адміністратор відповість, коли відкриємося», а не «передав, чекайте».
     """
     if reason == Reason.EMERGENCY:
-        return EMERGENCY_TEXT
-    return f"{CLIENT_TEXT[reason]}\n{HANDOFF_CONFIRM}"
+        return emergency_text()
+    opens = closed_until()
+    confirm = HANDOFF_CONFIRM if opens is None else _closed("handoff_confirm", opens)
+    return f"{_reason_text(reason, opens)}\n{confirm}"
+
+
+def waiting_text() -> str:
+    """Клієнт уже в розмові з адміном і пише ще: хто і коли це побачить."""
+    opens = closed_until()
+    return WAITING_TEXT if opens is None else _closed("waiting", opens)
+
+
+def call_us_text() -> str:
+    """«Зателефонуйте нам» — коли бот не може відповісти сам (збій моделі). Поза графіком
+    чесно кажемо, коли телефон візьмуть."""
+    opens = closed_until()
+    if opens is None:
+        return f"Зателефонуйте нам: {KB['business']['phone']}"
+    return _closed("call_us", opens)
+
+
+def admin_label(reason: Reason) -> str:
+    """Мітка для адміна. Невідкладний стан поза графіком — клієнт отримав не телефон,
+    а текст на неробочий час: адмін має знати, що саме бачив клієнт."""
+    if reason == Reason.EMERGENCY and closed_until() is not None:
+        return "🚨 НЕВІДКЛАДНИЙ СТАН (поза графіком: клієнту дано текст для неробочого часу)"
+    return ADMIN_LABEL[reason]
 
 
 async def request_handoff(message: Message, reason: Reason, question: str) -> None:
@@ -117,7 +186,7 @@ async def request_handoff(message: Message, reason: Reason, question: str) -> No
     try:
         if already_open:
             # Клієнт уже на зв'язку — просто додаємо в його тему, що він ще хоче.
-            text = f"➕ {ADMIN_LABEL[reason]}: «{escape(question)}»"
+            text = f"➕ {admin_label(reason)}: «{escape(question)}»"
         else:
             text = await _admin_card(user, reason, question)
         await _send_to_topic(message.bot, user, text)
@@ -128,7 +197,7 @@ async def request_handoff(message: Message, reason: Reason, question: str) -> No
         return
 
     if already_open:
-        await message.answer("Ви вже на зв'язку з адміністратором — він побачить це повідомлення.")
+        await message.answer(waiting_text())
     else:
         await message.answer(client_notice(reason), reply_markup=main_menu)
 
@@ -142,13 +211,13 @@ async def send_emergency(message: Message, question: str) -> None:
     """
     user = message.from_user
     log.warning("EMERGENCY | user=%s", user.id)
-    await message.answer(EMERGENCY_TEXT, reply_markup=main_menu)
+    await message.answer(emergency_text(), reply_markup=main_menu)
     if ADMIN_CHAT_ID is None:
         return
     try:
         ticket = await _active_ticket(message.bot, user.id)
         if ticket is not None:  # клієнт уже в розмові з адміном — додаємо в його тему
-            await _send_to_topic(message.bot, user, f"➕ {ADMIN_LABEL[Reason.EMERGENCY]}: «{escape(question)}»")
+            await _send_to_topic(message.bot, user, f"➕ {admin_label(Reason.EMERGENCY)}: «{escape(question)}»")
             await tickets.touch(user.id)
         else:  # лише картка в тему клієнта; статус не чіпаємо — бот не замовкає
             card = await _admin_card(user, Reason.EMERGENCY, question)
@@ -236,7 +305,7 @@ async def _active_ticket(bot: Bot, user_id: int, tell_client: Message | None = N
     try:  # адміну — пояснення, щоб не дивувався, чому тема закрилась сама
         await bot.send_message(
             ADMIN_CHAT_ID,
-            f"⏱ Звернення закрито автоматично: {tickets.IDLE_HOURS:g} год без активності. "
+            f"⏱ Звернення закрито автоматично: {tickets.idle_limit_text()} без активності. "
             "Клієнту знову відповідає бот. Напишіть у тему — розмова відновиться.",
             message_thread_id=expired.thread_id,
         )
@@ -290,7 +359,7 @@ async def _admin_card(user: User, reason: Reason, question: str) -> str:
     """Картка звернення для адміна: хто, чому, що питав, про що говорив з ботом."""
     username = f"@{user.username}" if user.username else "без username"
     lines = [
-        f"🆕 <b>Нове звернення</b> · {ADMIN_LABEL[reason]}",
+        f"🆕 <b>Нове звернення</b> · {admin_label(reason)}",
         f"👤 {escape(user.full_name)} ({username}) · id <code>{user.id}</code>",
         # Кнопку показуємо як дію, а не як текст, що його «написав» клієнт.
         f"🔘 {escape(question)}" if question.startswith(BUTTON_PREFIX) else f"💬 «{escape(question)}»",
@@ -334,8 +403,8 @@ async def _history_before(user_id: int, question: str, limit: int = 6) -> tuple[
 
 
 async def _fallback_phone(message: Message, reason: Reason) -> None:
-    await message.answer(
-        f"{CLIENT_TEXT.get(reason, CLIENT_TEXT[Reason.NO_INFO])}\n"
-        f"Зв'язатися з адміністратором можна за телефоном: {KB['business']['phone']}",
-        reply_markup=main_menu,
-    )
+    opens = closed_until()
+    first = _reason_text(reason if reason in CLIENT_TEXT else Reason.NO_INFO, opens)
+    contact = (f"Зв'язатися з адміністратором можна за телефоном: {KB['business']['phone']}"
+               if opens is None else _closed("call_us", opens))
+    await message.answer(f"{first}\n{contact}", reply_markup=main_menu)

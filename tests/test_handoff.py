@@ -7,12 +7,14 @@
 що бачить адмін і в якому стані лишається звернення після кожної події.
 """
 import unittest
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
 
-from bot import db, handoff, history, limits, tickets
+from bot import db, handoff, history, hours, knowledge, limits, tickets
 from bot.handlers import admin
 from bot.knowledge import format_emergency
 from bot.reasons import Reason
@@ -105,6 +107,107 @@ class Emergency(HandoffCase):
         with patch.dict(handoff.SAFETY, {"emergency_text": "Вага <5 кг & більше — телефонуйте"}):
             self.assertEqual(handoff._safety_text("emergency_text"), "Вага &lt;5 кг &amp; більше — телефонуйте")
             self.assertEqual(handoff._safety_text("emergency_text"), format_emergency())
+
+
+# Пн–Сб 10–17, неділя вихідний. 2026-11-17 — вівторок, 2026-11-21 — субота.
+CLINIC_SCHEDULE = hours.parse_schedule({"regular": {
+    **{d: "10:00–17:00" for d in hours.WEEKDAYS[:6]}, "sunday": "вихідний"}})
+AFTER_HOURS = {
+    "emergency_text": "🚨 Клініка зачинена, відкриється {opens}. Зверніться до цілодобової клініки.",
+    "medical_text": "🩺 Порад не даю. Зараз зачинено — якщо погано, до цілодобової клініки.",
+}
+TUESDAY_NOON = datetime(2026, 11, 17, 12, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+SATURDAY_EVENING = datetime(2026, 11, 21, 18, 0, tzinfo=ZoneInfo("Europe/Kyiv"))
+
+
+class AfterHours(HandoffCase):
+    """ui.after_hours: поза графіком жоден фіксований текст не обіцяє, що людина відповість
+    зараз, і не радить телефонувати туди, де ніхто не візьме трубку."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        for patcher in (patch.object(knowledge, "SCHEDULE", CLINIC_SCHEDULE),
+                        patch.dict(knowledge.AFTER_HOURS, AFTER_HOURS, clear=True),
+                        patch.dict(handoff.SAFETY, {"medical": True})):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.at(SATURDAY_EVENING)
+
+    def at(self, moment: datetime) -> None:
+        patcher = patch.object(knowledge, "now", return_value=moment)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_handoff_when_closed_says_when_admin_answers(self):
+        message = client_message(self.bot)
+        await handoff.request_handoff(message, Reason.BOOKING, "Запишіть кота на вакцинацію")
+        text = sent_to(message.answer)
+        self.assertIn(handoff.CLIENT_TEXT[Reason.BOOKING], text)
+        self.assertIn("зачинені", text)
+        self.assertIn("у понеділок з 10:00", text)
+        self.assertNotIn(handoff.HANDOFF_CONFIRM, text)
+
+    async def test_handoff_when_open_is_unchanged(self):
+        self.at(TUESDAY_NOON)
+        for reason in (Reason.BOOKING, Reason.HUMAN_REQUEST, Reason.MEDICAL):
+            with self.subTest(reason=reason):
+                self.assertEqual(handoff.client_notice(reason),
+                                 f"{handoff.CLIENT_TEXT[reason]}\n{handoff.HANDOFF_CONFIRM}")
+
+    async def test_yaml_text_overrides_default(self):
+        with patch.dict(knowledge.AFTER_HOURS, {"handoff_confirm": "Відповімо {opens}."}):
+            self.assertTrue(handoff.client_notice(Reason.HUMAN_REQUEST).endswith("Відповімо у понеділок з 10:00."))
+
+    async def test_emergency_when_closed_gives_no_clinic_phone(self):
+        message = client_message(self.bot)
+        await handoff.request_handoff(message, Reason.EMERGENCY, "Собака з'їла шоколадку")
+        text = sent_to(message.answer)
+        self.assertEqual(text, "🚨 Клініка зачинена, відкриється у понеділок з 10:00. "
+                               "Зверніться до цілодобової клініки.")
+        self.assertNotIn(PHONE_TEXT, text)
+        self.assertIn("поза графіком", sent_to_topic(self.bot)[0])  # адмін знає, що бачив клієнт
+
+    async def test_emergency_when_open_gives_phone(self):
+        self.at(TUESDAY_NOON)
+        message = client_message(self.bot)
+        await handoff.request_handoff(message, Reason.EMERGENCY, "Собака з'їла шоколадку")
+        self.assertEqual(sent_to(message.answer), PHONE_TEXT)
+
+    async def test_menu_button_and_limit_hint_follow_the_clock(self):
+        self.assertIn("зачинена", format_emergency())
+        self.assertIn("зачинена", handoff.with_emergency_hint("Ліміт вичерпано."))
+        self.at(TUESDAY_NOON)
+        self.assertIn(PHONE_TEXT, handoff.with_emergency_hint("Ліміт вичерпано."))
+
+    async def test_symptom_when_closed(self):
+        text = handoff.client_notice(Reason.MEDICAL)
+        self.assertTrue(text.startswith("🩺 Порад не даю. Зараз зачинено"))
+        self.assertIn("у понеділок з 10:00", text)
+
+    async def test_sensitive_topic_when_closed(self):
+        with patch.dict(handoff.CLIENT_TEXT, {Reason.SENSITIVE: "💙 Нам дуже шкода."}):
+            text = handoff.client_notice(Reason.SENSITIVE)
+        self.assertTrue(text.startswith("💙 Нам дуже шкода.\n"))
+        self.assertIn("у понеділок з 10:00", text)
+
+    async def test_waiting_in_open_conversation(self):
+        await self.open_ticket()
+        message = client_message(self.bot)
+        await handoff.request_handoff(message, Reason.HUMAN_REQUEST, "Ау?")
+        self.assertIn("коли відкриємося, — у понеділок з 10:00", sent_to(message.answer))
+
+    async def test_phone_fallback_says_when_to_call(self):
+        message = client_message(self.bot)
+        with patch.object(handoff, "ADMIN_CHAT_ID", None):
+            await handoff.request_handoff(message, Reason.HUMAN_REQUEST, "Покличте людину")
+        text = sent_to(message.answer)
+        self.assertIn("зачинені", text)
+        self.assertIn(f"у понеділок з 10:00: {handoff.KB['business']['phone']}", text)
+
+    def test_call_us(self):
+        self.assertIn("у понеділок з 10:00", handoff.call_us_text())
+        self.at(TUESDAY_NOON)
+        self.assertEqual(handoff.call_us_text(), f"Зателефонуйте нам: {handoff.KB['business']['phone']}")
 
 
 class ForwardToAdmin(HandoffCase):

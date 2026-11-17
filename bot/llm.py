@@ -15,7 +15,7 @@ from google import genai
 from google.genai import errors, types
 
 from bot.config import load_config, require_secrets
-from bot.knowledge import medical_mode
+from bot.knowledge import medical_mode, sensitive_mode
 from bot.reasons import MEDICAL_REASONS, Reason
 
 log = logging.getLogger(__name__)
@@ -48,6 +48,9 @@ REQUEST_TIMEOUT_MS = 30_000
 
 # Медичний режим вмикається в YAML бізнесу. Без нього модель навіть не бачить цих причин.
 MEDICAL_MODE = medical_mode()
+# Делікатна тема (safety.sensitive): код ловить її за словами, модель — помилки, іншу мову
+# й переказ. Причину sensitive модель бачить лише в бізнесу, де цей розділ є.
+SENSITIVE_MODE = sensitive_mode()
 
 _ANSWER_DESC = (
     "Текст для клієнта. Без обіцянок дій: не пиши «передам», «запишу», "
@@ -71,9 +74,10 @@ def _response_schema() -> type[BaseModel]:
     """Схема для Gemini: та сама BotReply, але лише з причинами, доступними цьому бізнесу.
 
     Барбершоп отримує рівно ту схему, що й раніше (без emergency / medical_question),
-    тож його поведінка не змінюється.
+    тож його поведінка не змінюється. sensitive — лише з safety.sensitive у YAML.
     """
-    allowed = [r for r in Reason if MEDICAL_MODE or r not in MEDICAL_REASONS]
+    allowed = [r for r in Reason
+               if (MEDICAL_MODE or r not in MEDICAL_REASONS) and (SENSITIVE_MODE or r != Reason.SENSITIVE)]
     reason_enum = Enum("Reason", {r.name: r.value for r in allowed}, type=str)
     reason_enum.__doc__ = Reason.__doc__  # описи теж ідуть моделі — лишаємо їх як були
     return create_model(
@@ -129,11 +133,11 @@ async def ask_llm(system_prompt: str, history: list[dict]) -> BotReply:
 def _consistent(reply: BotReply) -> BotReply:
     """Захист від суперечностей: «людина не потрібна», але причина вказана — і навпаки.
 
-    Медичну причину (emergency, medical_question) НЕ відкидаємо, навіть якщо модель
-    написала needs_human = false: у сумнівному випадку безпечніше дати телефон і людину,
-    ніж показати клієнту текст моделі про стан тварини.
+    Медичну причину (emergency, medical_question) і делікатну тему (sensitive) НЕ відкидаємо,
+    навіть якщо модель написала needs_human = false: у сумнівному випадку безпечніше дати
+    телефон і людину, ніж показати клієнту текст моделі про стан тварини чи про прощання з нею.
     """
-    if reply.reason in MEDICAL_REASONS:
+    if reply.reason in (*MEDICAL_REASONS, Reason.SENSITIVE):
         if not reply.needs_human:
             log.warning("Модель: needs_human=false, але reason=%s — лишаю причину", reply.reason.value)
         reply.needs_human = True

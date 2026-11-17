@@ -13,11 +13,11 @@
 важливе через неточний пошук. RAG потрібен, коли документів сотні сторінок.
 """
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import yaml
 
-from bot.knowledge import KB, facts
+from bot import hours, knowledge
+from bot.knowledge import KB, SAFETY, facts
 
 # Як назвати пояс у промпті. Пояс береться з YAML (schedule.timezone); раніше «час Києва»
 # був зашитий у код. Для Києва текст той самий — промпт барбершопу не змінюється.
@@ -63,6 +63,10 @@ RULES_TEMPLATE = """Ти — {role}. Відповідаєш клієнтам н�
 НЕ відповідай на них навіть коротко — лише скажи, що допомагаєш тільки з
 питаннями про {topic} (needs_human = false).{extra}"""
 
+# Лише з safety.sensitive у YAML: тоді в схемі моделі є причина sensitive. {describe} — з YAML.
+SENSITIVE_REASON = """- sensitive — делікатна тема: {describe}. Так само, якщо це написано з помилками,
+  іншою мовою чи описово. В answer — коротко і співчутливо; ціну — лише якщо про неї прямо питають;"""
+
 GENERIC_REASONS = """- booking — клієнт ПРОСИТЬ виконати дію: записати, перенести чи скасувати
   ЙОГО запис, або питає про вільний час (ти не бачиш розклад записів).
   Питання ПРО ПРАВИЛА («чи можна скасувати за годину?», «чи треба передоплата?»)
@@ -77,6 +81,9 @@ def build_rules() -> str:
     p = KB.get("prompt") or {}
     reasons = GENERIC_REASONS.format(
         no_info_examples=p.get("no_info_examples", "послуги, яких немає в списку, тощо"))
+    sensitive = SAFETY.get("sensitive") or {}
+    if sensitive.get("describe"):
+        reasons = SENSITIVE_REASON.format(describe=str(sensitive["describe"]).strip()) + "\n" + reasons
     if p.get("extra_reasons"):  # особливі причини (напр. невідкладний стан) — першими
         reasons = p["extra_reasons"].rstrip("\n") + "\n" + reasons
     extra = p.get("extra", "").rstrip("\n")
@@ -92,16 +99,35 @@ def build_rules() -> str:
 RULES = build_rules()
 
 
+def open_status(now: datetime) -> str:
+    """Чи відкрито зараз — пораховано кодом за графіком (лише якщо є ui.after_hours).
+
+    Модель погано рахує дні тижня й години («сьогодні неділя, а відкриваються в понеділок о 10»),
+    тому готову відповідь даємо їй рядком. Без графіка — порожньо, і промпт не змінюється.
+    """
+    schedule = knowledge.SCHEDULE
+    if schedule is None:
+        return ""
+    prefix = "ЧИ ВІДКРИТО ЗАРАЗ (пораховано системою за графіком — спирайся саме на це)"
+    if hours.is_open(schedule, now):
+        closes = schedule.hours_on(now.date())[1]
+        return f"\n{prefix}: відкрито, сьогодні до {closes:%H:%M}."
+    opens = hours.describe_opening(now, hours.next_opening(schedule, now))
+    return (f"\n{prefix}: зачинено, відкриється {opens}. Не пиши, що можна прийти "
+            "чи що хтось відповість або візьме слухавку зараз.")
+
+
 def build_system_prompt() -> str:
     """Збирає промпт заново на кожен запит — бо змінюється поточний час.
 
     Без часу модель не відповість на "ви зараз відкриті?" чи "а завтра працюєте?".
+    Час — з knowledge.now(): тест-набір підставляє його для сценаріїв «у неділю».
     """
     tz = KB["schedule"]["timezone"]
-    now = datetime.now(ZoneInfo(tz))
+    now = knowledge.now()
     now_text = f"{now:%Y-%m-%d %H:%M}, {DAYS_FULL_UA[now.weekday()]}"
     return (
         f"{RULES}\n\n"
-        f"ЗАРАЗ: {now_text} ({TZ_NAMES.get(tz, f'часовий пояс {tz}')}).\n\n"
+        f"ЗАРАЗ: {now_text} ({TZ_NAMES.get(tz, f'часовий пояс {tz}')}).{open_status(now)}\n\n"
         f"=== БАЗА ЗНАНЬ ===\n{KNOWLEDGE_TEXT}"
     )

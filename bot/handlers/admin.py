@@ -65,7 +65,8 @@ async def not_an_admin(message: Message) -> None:
 @router.message(Command("stats"), F.chat.id == ADMIN_CHAT_ID)
 async def show_stats(message: Message) -> None:
     """Цифри для власника: скільки людей пише боту і скільки доходить до адміна."""
-    st = await db.stats(tickets.IDLE_HOURS)
+    st = await db.stats()
+    st["tickets_open"] = await tickets.count_active()
     await message.reply(
         "📊 <b>Статистика бота</b>\n\n"
         f"👥 Клієнтів усього: {st['users_total']}\n"

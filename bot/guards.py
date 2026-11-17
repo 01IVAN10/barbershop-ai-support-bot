@@ -14,8 +14,9 @@
 """
 import logging
 import re
+from functools import lru_cache
 
-from bot.knowledge import SAFETY, medical_mode
+from bot.knowledge import SAFETY, medical_mode, sensitive_mode
 from bot.reasons import MEDICAL_REASONS, Reason
 
 log = logging.getLogger(__name__)
@@ -193,6 +194,26 @@ MEDICAL_ADVICE_RE = re.compile(
 )
 
 
+# Клієнт прямо питає ціну. Делікатна тема (safety.sensitive): ціну показуємо лише тоді.
+PRICE_QUESTION_RE = re.compile(
+    r"\b(скільки|вартіст\w*|цін[аиуі]|ціною|коштує|коштуват\w*|прайс\w*|"
+    r"сколько|стоимост\w*|цен[аыу]|стоит|how\s+much|price\w*|costs?)\b",
+    re.IGNORECASE,
+)
+
+
+@lru_cache(maxsize=4)
+def _words_re(words: tuple[str, ...]) -> re.Pattern:
+    """Початки слів із YAML → регулярний вираз: «евтаназ» ловить «евтаназія», «евтаназію»."""
+    return re.compile(r"\b(" + "|".join(re.escape(w.strip()) for w in words) + r")\w*", re.IGNORECASE)
+
+
+def detect_sensitive(text: str) -> bool:
+    """Делікатна тема з safety.sensitive.words (напр. евтаназія, прощання з твариною)."""
+    words = (SAFETY.get("sensitive") or {}).get("words") or []
+    return bool(words) and bool(_words_re(tuple(words)).search(text))
+
+
 def strip_promises(text: str) -> str:
     """Прибирає речення з обіцянками дій. Решту тексту залишає як є — з посиланнями,
     числами і переносами рядків (раніше текст склеювався заново і ламав «example.com.ua»)."""
@@ -256,12 +277,24 @@ def resolve(question: str, answer: str, reason: Reason) -> tuple[Reason, str]:
       зателефонуйте», а система одразу — «передав адміністратору». Ясність важливіша;
     - медичний режим: невідкладний стан / симптом у питанні / порада у відповіді →
       текст моделі НЕ показуємо, лише фіксований безпечний текст;
+    - делікатна тема (safety.sensitive, напр. евтаназія; слово зі списку АБО причина від
+      моделі): завжди людина і співчутливий фіксований текст; текст моделі — лише якщо
+      клієнт ПРЯМО питає ціну;
     - решта: текст моделі без обіцянок дій (+ примітка до ціни, якщо задана).
+
+    Порядок: невідкладний стан → делікатна тема → симптом. «Пес старий і хворіє, думаємо
+    про евтаназію» має отримати співчуття, а не сухе «я не оцінюю стан тварини».
     """
-    if medical_mode():
-        if detect_emergency(question):
-            reason = Reason.EMERGENCY
-        elif reason in (Reason.NONE, Reason.NO_INFO, Reason.BOOKING) and detect_symptom(question):
+    if medical_mode() and detect_emergency(question):
+        reason = Reason.EMERGENCY
+    elif reason == Reason.SENSITIVE and not sensitive_mode():
+        reason = Reason.NO_INFO  # бізнес без делікатної теми: такої причини не буває
+    elif reason != Reason.EMERGENCY and (reason == Reason.SENSITIVE or detect_sensitive(question)):
+        # Слово зі списку — гарантія коду; модель додає помилки, іншу мову й переказ.
+        log.info("Делікатна тема — передаємо людині (модель: %s)", reason.value)
+        reason = Reason.SENSITIVE
+    elif medical_mode():
+        if reason in (Reason.NONE, Reason.NO_INFO, Reason.BOOKING) and detect_symptom(question):
             log.warning("Симптом у питанні — медичне питання, а не %s", reason.value)
             reason = Reason.MEDICAL
         elif reason in (Reason.NONE, Reason.NO_INFO) and has_medical_advice(answer):
@@ -270,6 +303,11 @@ def resolve(question: str, answer: str, reason: Reason) -> tuple[Reason, str]:
     elif reason in MEDICAL_REASONS:  # бізнес без медичного режиму: таких причин не буває
         reason = Reason.NO_INFO
 
+    if reason == Reason.SENSITIVE:
+        asked_price = PRICE_QUESTION_RE.search(question) and PRICE_RE.search(answer)
+        if not asked_price or has_medical_advice(answer):
+            return reason, ""
+        return reason, add_price_note(strip_promises(answer))
     if reason in (Reason.BOOKING, Reason.HUMAN_REQUEST, Reason.COMPLAINT, *MEDICAL_REASONS):
         return reason, ""
     text = add_price_note(strip_promises(answer))
