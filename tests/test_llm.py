@@ -5,7 +5,9 @@
 """
 import dataclasses
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from google.genai import errors
 
 from bot import llm
 from bot.llm import BotReply, _consistent
@@ -32,6 +34,33 @@ class Consistency(unittest.TestCase):
     def test_consistent_reply_is_unchanged(self):
         self.assertEqual(self.check(True, Reason.BOOKING), (True, Reason.BOOKING))
         self.assertEqual(self.check(False, Reason.NONE), (False, Reason.NONE))
+
+
+
+class Retry(unittest.IsolatedAsyncioTestCase):
+    """Тимчасовий збій Gemini → ще спроба; постійний (ключ, модель) → одразу помилка."""
+
+    async def call(self, *outcomes):
+        generate = AsyncMock(side_effect=list(outcomes))
+        client = MagicMock()
+        client.aio.models.generate_content = generate
+        with patch.object(llm, "_get_client", return_value=client), \
+                patch.object(llm.asyncio, "sleep", AsyncMock()):
+            result = await llm._generate_with_retry("prompt", [])
+        return result, generate.await_count
+
+    async def test_temporary_errors_are_retried(self):
+        for code in (429, 500, 503, 504):
+            with self.subTest(code=code):
+                self.assertEqual(await self.call(errors.APIError(code, {}), "ok"), ("ok", 2))
+
+    async def test_permanent_error_is_not_retried(self):
+        with self.assertRaises(llm.LLMError):
+            await self.call(errors.APIError(400, {}), "ok")
+
+    async def test_gives_up_after_three_attempts(self):
+        with self.assertRaises(llm.LLMError):
+            await self.call(*[errors.APIError(504, {})] * 3, "ok")
 
 
 class Schema(unittest.TestCase):
