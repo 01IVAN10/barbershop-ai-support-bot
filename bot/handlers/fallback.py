@@ -97,10 +97,15 @@ async def ai_answer(message: Message) -> None:
 
     # parse_mode=None: відповідь моделі — звичайний текст. Якщо модель випадково
     # напише "<" чи "&", HTML-режим Telegram зламався б і повідомлення не пішло б.
-    if client_text:
+    # Делікатна тема: співчуття → ціна → передача — одним повідомленням (handoff.request_handoff),
+    # а не «1 500 грн» окремо ДО співчуття. Решта — як завжди: відповідь, потім передача.
+    together = reason == Reason.SENSITIVE
+    if client_text and not together:
         await message.answer(client_text, parse_mode=None)
 
-    if reason != Reason.NONE:
+    if together:
+        await request_handoff(message, reason, question, client_text)
+    elif reason != Reason.NONE:
         await request_handoff(message, reason, question)
 
 

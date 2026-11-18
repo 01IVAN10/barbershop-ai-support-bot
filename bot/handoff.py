@@ -134,17 +134,30 @@ def with_emergency_hint(text: str) -> str:
     return f"{text}\n\n{emergency_text()}"
 
 
-def client_notice(reason: Reason) -> str:
+def _with_answer(first: str, answer: str, last: str) -> str:
+    """Перший рядок передачі + (якщо є) відповідь моделі + що буде далі — одним текстом.
+
+    Відповідь моделі сюди йде лише на делікатній темі (handlers/fallback.py): там
+    спершу співчуття, а вже потім ціна — окреме повідомлення «1 500 грн» перед
+    співчуттям читається холодно. Відповідь — звичайний текст, тому escape.
+    """
+    if not answer:
+        return f"{first}\n{last}"
+    return f"{first}\n\n{escape(answer)}\n\n{last}"
+
+
+def client_notice(reason: Reason, answer: str = "") -> str:
     """Фіксований текст, який клієнт бачить при передачі (звичайний шлях, нове звернення).
 
     Окрема функція, бо її використовує і тест-набір: перевіряємо те, що бачить клієнт.
     Поза графіком — «адміністратор відповість, коли відкриємося», а не «передав, чекайте».
+    answer — відповідь моделі, яку треба показати всередині (див. _with_answer).
     """
     if reason == Reason.EMERGENCY:
         return emergency_text()
     opens = closed_until()
     confirm = HANDOFF_CONFIRM if opens is None else _closed("handoff_confirm", opens)
-    return f"{_reason_text(reason, opens)}\n{confirm}"
+    return _with_answer(_reason_text(reason, opens), answer, confirm)
 
 
 def waiting_text() -> str:
@@ -170,7 +183,9 @@ def admin_label(reason: Reason) -> str:
     return ADMIN_LABEL[reason]
 
 
-async def request_handoff(message: Message, reason: Reason, question: str) -> None:
+async def request_handoff(message: Message, reason: Reason, question: str, answer: str = "") -> None:
+    """Передача людині. answer — відповідь моделі, яку клієнт має побачити всередині
+    повідомлення про передачу, а не окремо перед ним (делікатна тема)."""
     if reason == Reason.EMERGENCY:
         await send_emergency(message, question)
         return
@@ -178,7 +193,7 @@ async def request_handoff(message: Message, reason: Reason, question: str) -> No
     log.info("HANDOFF | user=%s | reason=%s", user.id, reason.value)
 
     if ADMIN_CHAT_ID is None:  # адмін-група не налаштована → телефон
-        await _fallback_phone(message, reason)
+        await _fallback_phone(message, reason, answer)
         return
 
     ticket = await _active_ticket(message.bot, user.id)
@@ -193,13 +208,15 @@ async def request_handoff(message: Message, reason: Reason, question: str) -> No
         await tickets.start(user.id)  # розмова з адміном відкрита (або триває)
     except TelegramAPIError:
         log.exception("Не вдалося передати звернення в адмін-групу")
-        await _fallback_phone(message, reason)
+        await _fallback_phone(message, reason, answer)
         return
 
-    if already_open:
+    if already_open and answer:
+        await message.answer(_with_answer(_reason_text(reason, closed_until()), answer, waiting_text()))
+    elif already_open:
         await message.answer(waiting_text())
     else:
-        await message.answer(client_notice(reason), reply_markup=main_menu)
+        await message.answer(client_notice(reason, answer), reply_markup=main_menu)
 
 
 async def send_emergency(message: Message, question: str) -> None:
@@ -402,9 +419,9 @@ async def _history_before(user_id: int, question: str, limit: int = 6) -> tuple[
     return msgs[-limit:], answer
 
 
-async def _fallback_phone(message: Message, reason: Reason) -> None:
+async def _fallback_phone(message: Message, reason: Reason, answer: str = "") -> None:
     opens = closed_until()
     first = _reason_text(reason if reason in CLIENT_TEXT else Reason.NO_INFO, opens)
     contact = (f"Зв'язатися з адміністратором можна за телефоном: {KB['business']['phone']}"
                if opens is None else _closed("call_us", opens))
-    await message.answer(f"{first}\n{contact}", reply_markup=main_menu)
+    await message.answer(_with_answer(first, answer, contact), reply_markup=main_menu)

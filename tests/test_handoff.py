@@ -77,6 +77,44 @@ class RequestHandoff(HandoffCase):
         self.assertIsNone(await tickets.active(USER_ID))
 
 
+
+@patch.dict(handoff.CLIENT_TEXT, {Reason.SENSITIVE: "💙 Нам дуже шкода."})
+class SensitiveAnswerInside(HandoffCase):
+    """Делікатна тема з ціною: співчуття → ціна → що далі, одним повідомленням.
+    Раніше «1 500 грн» приходило окремо ДО співчуття — це читалося холодно."""
+
+    ANSWER = "Евтаназія котів коштує 1 500 грн <для тесту & escape>."
+
+    def assert_order(self, text: str, last: str) -> None:
+        parts = ["💙 Нам дуже шкода.", "1 500 грн &lt;для тесту &amp; escape&gt;", last]
+        positions = [text.find(p) for p in parts]
+        self.assertNotIn(-1, positions, text)
+        self.assertEqual(positions, sorted(positions), text)
+
+    def test_notice_without_answer_is_unchanged(self):
+        self.assertEqual(handoff.client_notice(Reason.SENSITIVE),
+                         f"💙 Нам дуже шкода.\n{handoff.HANDOFF_CONFIRM}")
+
+    async def test_new_request_is_one_message(self):
+        message = client_message(self.bot)
+        await handoff.request_handoff(message, Reason.SENSITIVE, "Скільки коштує?", self.ANSWER)
+        self.assertEqual(message.answer.await_count, 1)
+        self.assert_order(sent_to(message.answer), handoff.HANDOFF_CONFIRM)
+
+    async def test_open_conversation_keeps_compassion(self):
+        await self.open_ticket()
+        message = client_message(self.bot)
+        await handoff.request_handoff(message, Reason.SENSITIVE, "Скільки коштує?", self.ANSWER)
+        self.assertEqual(message.answer.await_count, 1)
+        self.assert_order(sent_to(message.answer), "вже на зв'язку")
+
+    async def test_phone_fallback_keeps_answer(self):
+        message = client_message(self.bot)
+        with patch.object(handoff, "ADMIN_CHAT_ID", None):
+            await handoff.request_handoff(message, Reason.SENSITIVE, "Скільки коштує?", self.ANSWER)
+        self.assert_order(sent_to(message.answer), handoff.KB["business"]["phone"])
+
+
 class Emergency(HandoffCase):
     async def test_client_gets_phone_and_bot_keeps_answering(self):
         """Картка йде в тему клієнта, але розмова з адміном НЕ відкривається: уночі адмін

@@ -84,8 +84,10 @@ async def client_sees(question: str, history: list[dict]) -> tuple[Reason, str, 
         return reason, client_notice(reason), False
     reply = await ask_llm(build_system_prompt(), history)
     reason, text = resolve(question, reply.answer, reply.reason)
-    notice = client_notice(reason) if reason != Reason.NONE else ""
     promise_cut = strip_promises(reply.answer) != reply.answer.strip()
+    if reason == Reason.SENSITIVE:  # як у боті: відповідь усередині тексту передачі
+        return reason, client_notice(reason, text), promise_cut
+    notice = client_notice(reason) if reason != Reason.NONE else ""
     return reason, "\n".join(t for t in (text, notice) if t), promise_cut
 
 
