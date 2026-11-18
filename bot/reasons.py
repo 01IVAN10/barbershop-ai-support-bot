@@ -19,6 +19,8 @@ class Reason(str, Enum):
     # Лише для бізнесів із safety.medical: true (ветклініка тощо):
     EMERGENCY = "emergency"          # невідкладний стан — клієнту одразу телефон, без «чекайте»
     MEDICAL = "medical_question"     # симптоми, стан, ліки, лікування — тільки людина
+    # Лише для бізнесів із safety.sensitive у YAML (напр. евтаназія у ветклініці):
+    SENSITIVE = "sensitive"          # делікатна тема — співчутливо і до людини
 
 
 MEDICAL_REASONS = frozenset({Reason.EMERGENCY, Reason.MEDICAL})

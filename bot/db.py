@@ -17,6 +17,7 @@
 """
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -62,6 +63,9 @@ class Ticket:
     thread_id: int
     status: str
     idle_minutes: float = 0.0  # скільки хвилин у зверненні нічого не відбувалося
+    # Остання активність (UTC). Потрібна, щоб рахувати простій лише в робочі години
+    # (tickets.is_stale): з самої кількості хвилин не видно, чи припали вони на ніч.
+    updated_at: datetime | None = None
 
     @property
     def is_open(self) -> bool:
@@ -95,7 +99,9 @@ _TICKET_COLUMNS = "*, (julianday('now') - julianday(updated_at)) * 24 * 60 AS id
 def _row_to_ticket(row) -> Ticket | None:
     if not row:
         return None
-    return Ticket(row["user_id"], row["thread_id"], row["status"], row["idle_minutes"])
+    # CURRENT_TIMESTAMP у SQLite — UTC без позначки поясу: «2026-11-21 14:55:00».
+    updated_at = datetime.fromisoformat(row["updated_at"]).replace(tzinfo=timezone.utc)
+    return Ticket(row["user_id"], row["thread_id"], row["status"], row["idle_minutes"], updated_at)
 
 
 async def get_ticket_by_user(user_id: int) -> Ticket | None:
@@ -108,6 +114,11 @@ async def get_ticket_by_user(user_id: int) -> Ticket | None:
 async def get_ticket_by_thread(thread_id: int) -> Ticket | None:
     async with _db.execute(f"SELECT {_TICKET_COLUMNS} FROM tickets WHERE thread_id = ?", (thread_id,)) as cur:
         return _row_to_ticket(await cur.fetchone())
+
+
+async def get_open_tickets() -> list[Ticket]:
+    async with _db.execute(f"SELECT {_TICKET_COLUMNS} FROM tickets WHERE status = 'open'") as cur:
+        return [_row_to_ticket(row) for row in await cur.fetchall()]
 
 
 # Три функції нижче викликає ЛИШЕ bot/tickets.py — він володіє переходами між станами.
@@ -223,14 +234,13 @@ async def count_questions(since_hours: int, user_id: int | None = None) -> int:
 
 # ---------- статистика ----------
 
-async def stats(ticket_idle_hours: float) -> dict:
+async def stats() -> dict:
     """Цифри для власника бізнесу (/stats в адмін-групі). «Доба» = останні 24 години.
 
     tickets_total — скільки клієнтів має тему в адмін-групі (один клієнт = одна тема),
-    а не скільки разів вони зверталися. tickets_open — лише «живі» розмови: прострочене
-    звернення закривається при наступному повідомленні клієнта, а до того лише значиться open.
+    а не скільки разів вони зверталися. Скільки розмов «живі» зараз, рахує tickets.count_active():
+    правило простою (зокрема «лише робочі години») має одного власника.
     """
-    idle = f"-{ticket_idle_hours * 60:.0f} minutes"
     queries = {
         "users_total": "SELECT COUNT(*) FROM users",
         "users_new_24h": "SELECT COUNT(*) FROM users WHERE first_seen >= datetime('now', '-1 day')",
@@ -243,8 +253,4 @@ async def stats(ticket_idle_hours: float) -> dict:
     for key, sql in queries.items():
         async with _db.execute(sql) as cur:
             result[key] = (await cur.fetchone())[0]
-    async with _db.execute(
-        "SELECT COUNT(*) FROM tickets WHERE status = 'open' AND updated_at >= datetime('now', ?)", (idle,)
-    ) as cur:
-        result["tickets_open"] = (await cur.fetchone())[0]
     return result

@@ -18,10 +18,9 @@ from aiogram.utils.chat_action import ChatActionSender
 
 from bot import history, limits
 from bot.guards import pre_check, resolve
-from bot.handoff import HANDOFF_MARK, forward_to_admin, request_handoff, with_emergency_hint
+from bot.handoff import HANDOFF_MARK, call_us_text, forward_to_admin, request_handoff, with_emergency_hint
 from bot.keyboards import main_menu
 from bot.middlewares import FLOOD_TEXT, FloodGuard
-from bot.knowledge import KB
 from bot.llm import LLMError, ask_llm
 from bot.prompts import build_system_prompt
 from bot.reasons import Reason
@@ -82,11 +81,8 @@ async def ai_answer(message: Message) -> None:
             reply = await ask_llm(build_system_prompt(), await history.get(user_id))
     except LLMError:
         await history.drop_last(user_id)  # невдалий обмін не залишаємо в історії
-        await message.answer(
-            "Вибачте, зараз не можу відповісти 😔\n"
-            f"Зателефонуйте нам: {KB['business']['phone']}",
-            reply_markup=main_menu,
-        )
+        await message.answer(f"Вибачте, зараз не можу відповісти 😔\n{call_us_text()}",
+                             reply_markup=main_menu)
         return
 
     # Що побачить клієнт і чи потрібна людина — вирішує КОД, а не модель (guards.resolve).
@@ -101,10 +97,15 @@ async def ai_answer(message: Message) -> None:
 
     # parse_mode=None: відповідь моделі — звичайний текст. Якщо модель випадково
     # напише "<" чи "&", HTML-режим Telegram зламався б і повідомлення не пішло б.
-    if client_text:
+    # Делікатна тема: співчуття → ціна → передача — одним повідомленням (handoff.request_handoff),
+    # а не «1 500 грн» окремо ДО співчуття. Решта — як завжди: відповідь, потім передача.
+    together = reason == Reason.SENSITIVE
+    if client_text and not together:
         await message.answer(client_text, parse_mode=None)
 
-    if reason != Reason.NONE:
+    if together:
+        await request_handoff(message, reason, question, client_text)
+    elif reason != Reason.NONE:
         await request_handoff(message, reason, question)
 
 

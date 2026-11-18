@@ -65,7 +65,7 @@ class Cleanup(DbCase):
         await self.age("users", "last_seen", 40, USER_ID)
         self.assertEqual(await db.purge_old_messages(30), 1)
         self.assertEqual(await db.purge_inactive_users(30), 1)
-        self.assertEqual((await db.stats(2))["users_total"], 0)
+        self.assertEqual((await db.stats())["users_total"], 0)
 
     async def test_active_clients_and_clients_with_topic_stay(self):
         await db.upsert_user(2, None, "Клієнт З Темою")

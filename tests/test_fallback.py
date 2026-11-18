@@ -136,6 +136,30 @@ class MedicalBusiness(FallbackCase):
         self.assertIn(PHONE_TEXT, _sent(message))
 
 
+
+SENSITIVE_ON = {"medical": True, "sensitive": {"words": ["евтаназ"], "describe": "евтаназія", "text": "💙"}}
+
+
+@patch.dict(guards.SAFETY, SENSITIVE_ON, clear=True)
+class SensitiveTopic(FallbackCase):
+    async def test_price_goes_inside_handoff_message(self):
+        """Ціна не надсилається окремо: її покаже передача — після співчуття."""
+        question = "Скільки коштує евтаназія кота?"
+        self.model_says("Евтаназія котів коштує 1 500 грн.", Reason.SENSITIVE)
+        message = _message(text=question)
+        await fallback.ai_answer(message)
+        message.answer.assert_not_awaited()
+        args = self.request_handoff.await_args.args
+        self.assertEqual(args[:3], (message, Reason.SENSITIVE, question))
+        self.assertIn("1 500 грн", args[3])
+
+    async def test_without_price_question_nothing_extra(self):
+        self.model_says("Процедура проходить так…", Reason.SENSITIVE)
+        message = _message(text="Як відбувається евтаназія?")
+        await fallback.ai_answer(message)
+        message.answer.assert_not_awaited()
+        self.request_handoff.assert_awaited_once_with(message, Reason.SENSITIVE, "Як відбувається евтаназія?", "")
+
 @patch.dict(guards.SAFETY, {}, clear=True)
 class RegularBusiness(FallbackCase):
     async def test_caption_is_not_checked_without_medical_mode(self):
