@@ -17,19 +17,27 @@
 (guards.pre_check → модель → guards.resolve → handoff.client_notice), а не копія
 логіки — інакше тест і бот колись розійдуться.
 
+Фіксований час: поле `now: "2026-11-22 12:00"` у сценарії (час бізнесу) — бот «живе» в цей
+момент: промпт, тексти «поза графіком» і невідкладний стан беруть час з knowledge.now().
+Без поля — справжній поточний час.
+
 Результат: таблиця в терміналі + eval_report.md поруч із файлом сценаріїв.
 """
 import argparse
 import asyncio
+import contextlib
 import logging
 import re
 import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 import yaml
 
+from bot import knowledge
 from bot.config import load_config, require_secrets
 from bot.guards import PRICE_RE, pre_check, resolve, strip_promises
 from bot.handoff import client_notice
@@ -79,6 +87,15 @@ async def client_sees(question: str, history: list[dict]) -> tuple[Reason, str, 
     notice = client_notice(reason) if reason != Reason.NONE else ""
     promise_cut = strip_promises(reply.answer) != reply.answer.strip()
     return reason, "\n".join(t for t in (text, notice) if t), promise_cut
+
+
+def case_clock(case: dict):
+    """Підміняє годинник бота на час зі сценарію (поле now), якщо він заданий."""
+    if "now" not in case:
+        return contextlib.nullcontext()
+    moment = datetime.strptime(str(case["now"]), "%Y-%m-%d %H:%M").replace(
+        tzinfo=ZoneInfo(knowledge.KB["schedule"]["timezone"]))
+    return patch.object(knowledge, "now", return_value=moment)
 
 
 def check(case: dict, reason: Reason, text: str) -> list[str]:
@@ -142,7 +159,8 @@ async def run(repeat: int, delay: float, only: set[str] | None,
         runs = []
         for _ in range(repeat):
             try:
-                reason, text, promise_cut = await client_sees(case["question"], history)
+                with case_clock(case):
+                    reason, text, promise_cut = await client_sees(case["question"], history)
                 problems = check(case, reason, text)
                 runs.append((not problems, problems, text or f"[{reason.value}]", promise_cut))
             except LLMError as e:
@@ -195,6 +213,8 @@ def write_report(results, repeat: int, model: str, report_file: Path) -> None:
         passed = sum(r[0] for r in runs)
         mark = "✅" if passed == len(runs) else ("⚠️" if passed else "❌")
         q = case["question"].replace("|", "/")
+        if "now" in case:  # сценарій із фіксованим часом — показуємо його
+            q = f"[{case['now']}] {q}"
         lines.append(f"| {i} | {case['id']} | {q} | {mark} {passed}/{len(runs)} |")
 
     failures = [(c, r) for c, runs in results for r in runs if not r[0]]
